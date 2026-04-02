@@ -12,7 +12,8 @@ from backend.services.filters import (
     apply_empaque_filters,
 )
 from backend.services.performance import cache_response
-from backend.services.metrics import safe_div, pct, compute_insights_costos
+from backend.services.metrics import safe_div, compute_insights_costos
+from backend.services.profitability import average_fx, estimated_margin_summary
 
 router = APIRouter()
 
@@ -119,12 +120,7 @@ def get_costos(
 
     # margen_bruto: ingresos usd - costos (convert to USD using avg tipo_cambio if available)
     ingresos_usd = float(df_com["importe_usd"].sum()) if not df_com.empty else 0.0
-    # Costos are mostly ARS; compute avg exchange rate from comercial for approximate USD
-    avg_tc = 1.0
-    if not df_com.empty and "tipo_cambio" in df_com.columns:
-        avg_tc = float(df_com["tipo_cambio"].mean())
-        if avg_tc == 0:
-            avg_tc = 1.0
+    avg_tc = average_fx(df_com)
     costos_usd = safe_div(costo_directo_total, avg_tc)
     margen_bruto_usd = round(ingresos_usd - costos_usd, 2)
     margen_bruto_pct = round(safe_div(margen_bruto_usd, ingresos_usd) * 100, 1) if ingresos_usd > 0 else 0.0
@@ -218,87 +214,36 @@ def get_costos(
             )
 
     # -----------------------------------------------------------------------
-    # Costo por canal (join with comercial for margin)
+    # Margen estimado por canal
     # -----------------------------------------------------------------------
     costo_por_canal = []
-    if "canal" in df_cos.columns:
-        revenue_by_channel = pd.DataFrame()
-        if not df_com.empty and "canal" in df_com.columns:
-            revenue_by_channel = (
-                df_com.groupby("canal")["importe_usd"].sum().reset_index()
-            )
-        revenue_total = float(revenue_by_channel["importe_usd"].sum()) if not revenue_by_channel.empty else 0.0
-
-        direct_costs = (
-            df_cos[df_cos["canal"] != "General"]
-            .groupby("canal")["importe"]
-            .sum()
-            .reset_index()
-        )
-        general_cost = float(df_cos[df_cos["canal"] == "General"]["importe"].sum())
-
-        canal_cos_grp = direct_costs.copy()
-        if revenue_by_channel.empty and not canal_cos_grp.empty:
-            total_direct = float(canal_cos_grp["importe"].sum())
-            canal_cos_grp["importe"] = canal_cos_grp.apply(
-                lambda r: float(r["importe"]) + safe_div(float(r["importe"]), total_direct) * general_cost,
-                axis=1,
-            )
-        elif not revenue_by_channel.empty:
-            if canal_cos_grp.empty:
-                canal_cos_grp = revenue_by_channel.rename(columns={"importe_usd": "importe"})
-                canal_cos_grp["importe"] = 0.0
-            canal_cos_grp = canal_cos_grp.merge(revenue_by_channel, on="canal", how="outer").fillna(0)
-            canal_cos_grp["importe"] = canal_cos_grp.apply(
-                lambda r: float(r["importe"]) + safe_div(float(r["importe_usd"]), revenue_total) * general_cost,
-                axis=1,
-            )
-        else:
-            canal_cos_grp = pd.DataFrame(columns=["canal", "importe"])
-
-        for _, row in canal_cos_grp.iterrows():
-            c = row["canal"]
-            ingreso_usd_c = 0.0
-            if not revenue_by_channel.empty and c in revenue_by_channel["canal"].values:
-                ingreso_usd_c = float(revenue_by_channel[revenue_by_channel["canal"] == c]["importe_usd"].values[0])
-            costo_usd_c = safe_div(float(row["importe"]), avg_tc)
-            margen_c = round(safe_div(ingreso_usd_c - costo_usd_c, ingreso_usd_c) * 100, 1) if ingreso_usd_c > 0 else 0.0
-            costo_por_canal.append(
-                {
-                    "canal": str(c),
-                    "costo_total": round(float(row["importe"]), 2),
-                    "ingreso_usd": round(ingreso_usd_c, 2),
-                    "margen_pct": margen_c,
-                }
-            )
-        costo_por_canal.sort(key=lambda x: x["margen_pct"], reverse=True)
-        if costo_por_canal:
-            mejor_canal = str(costo_por_canal[0]["canal"])
+    canal_margin = estimated_margin_summary(df_com, "canal")
+    if not canal_margin.empty:
+        costo_por_canal = [
+            {
+                "canal": str(row["canal"]),
+                "costo_total": round(float(row["costo_estimado_ars"]), 2),
+                "costo_usd": round(float(row["costo_estimado_usd"]), 2),
+                "ingreso_usd": round(float(row["ingreso_usd"]), 2),
+                "margen_usd": round(float(row["margen_usd"]), 2),
+                "margen_pct": float(row["margen_pct"]),
+            }
+            for _, row in canal_margin.iterrows()
+        ]
+        mejor_canal = str(costo_por_canal[0]["canal"])
 
     # -----------------------------------------------------------------------
     # Margen por cliente
     # -----------------------------------------------------------------------
     margen_por_cliente = []
-    if not df_com.empty and "cliente" in df_com.columns and "margen_estimado" in df_com.columns:
-        cli_grp = df_com.copy()
-        cli_grp["margen_ponderado"] = cli_grp["margen_estimado"] * cli_grp["importe_usd"]
-        cli_grp = (
-            cli_grp.groupby("cliente")
-            .agg(
-                ingreso_usd=("importe_usd", "sum"),
-                margen_ponderado=("margen_ponderado", "sum"),
-            )
-            .reset_index()
-        )
-        cli_grp["margen_pct"] = cli_grp.apply(
-            lambda r: round(safe_div(float(r["margen_ponderado"]), float(r["ingreso_usd"])) * 100, 1),
-            axis=1,
-        )
-        cli_grp = cli_grp.sort_values("margen_pct", ascending=False)
+    cli_grp = estimated_margin_summary(df_com, "cliente")
+    if not cli_grp.empty:
         margen_por_cliente = [
             {
                 "cliente": str(row["cliente"]),
+                "costo_total": round(float(row["costo_estimado_ars"]), 2),
                 "margen_pct": float(row["margen_pct"]),
+                "margen_usd": round(float(row["margen_usd"]), 2),
                 "ingreso_usd": round(float(row["ingreso_usd"]), 2),
             }
             for _, row in cli_grp.iterrows()
@@ -308,24 +253,16 @@ def get_costos(
     # Margen por destino
     # -----------------------------------------------------------------------
     margen_por_destino = []
-    if not df_com.empty and "destino" in df_com.columns and "margen_estimado" in df_com.columns:
-        dest_grp = df_com.copy()
-        dest_grp["margen_ponderado"] = dest_grp["margen_estimado"] * dest_grp["importe_usd"]
-        dest_grp = (
-            dest_grp.groupby("destino")
-            .agg(
-                importe_usd=("importe_usd", "sum"),
-                margen_ponderado=("margen_ponderado", "sum"),
-            )
-            .reset_index()
-        )
-        dest_grp["margen_pct"] = dest_grp.apply(
-            lambda r: round(safe_div(float(r["margen_ponderado"]), float(r["importe_usd"])) * 100, 1),
-            axis=1,
-        )
-        dest_grp = dest_grp.sort_values("margen_pct", ascending=False)
+    dest_grp = estimated_margin_summary(df_com, "destino")
+    if not dest_grp.empty:
         margen_por_destino = [
-            {"destino": str(row["destino"]), "margen_pct": float(row["margen_pct"])}
+            {
+                "destino": str(row["destino"]),
+                "costo_total": round(float(row["costo_estimado_ars"]), 2),
+                "ingreso_usd": round(float(row["ingreso_usd"]), 2),
+                "margen_usd": round(float(row["margen_usd"]), 2),
+                "margen_pct": float(row["margen_pct"]),
+            }
             for _, row in dest_grp.iterrows()
         ]
 

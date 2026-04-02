@@ -18,6 +18,7 @@ def kpi_card(
     delta: str = "",
     delta_type: str = "neutral",
     accent: str = "primary",
+    subtitle: str = "",
     drill_panel: str | None = None,
     drill_item: str | None = None,
 ):
@@ -41,6 +42,8 @@ def kpi_card(
             [arrow, " ", delta],
             className=f"kpi-delta {delta_type}",
         )
+
+    subtitle_elem = html.Div(subtitle, className="kpi-subtitle") if subtitle else None
 
     is_drilldown = bool(drill_panel and drill_item)
     detail_hint = (
@@ -75,6 +78,7 @@ def kpi_card(
                 ],
                 className="kpi-value-row",
             ),
+            subtitle_elem,
             delta_elem,
             detail_hint,
         ],

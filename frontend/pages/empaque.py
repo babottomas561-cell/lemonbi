@@ -5,26 +5,38 @@ import dash_bootstrap_components as dbc
 import plotly.graph_objects as go
 
 from frontend.components.drilldown import drilldown_chart_card
+from frontend.components.filter_bar import bind_date_shortcuts, campaign_filter, date_range_filter, dropdown_filter, render_filter_bar
 from frontend.components.kpi_card import kpi_card
-from frontend.components.loading import loading_graph, loading_slot
+from frontend.components.loading import loading_slot
 from frontend.components.tables import render_table
 from frontend.components.empty_state import empty_state
 from frontend.components.header import render_header
 from frontend.utils import (
     CHART_COLORS,
+    add_metric_badge,
+    add_peak_annotation,
+    add_reference_line,
     api_get,
+    best_index,
     build_options,
     chart_layout,
+    compact_number,
     empty_figure,
     fetch_options,
     filter_params,
+    format_week_label,
     fmt_num,
     insights_panel,
+    page_empty_outputs,
+    page_failure_outputs,
     panel_filter_options,
+    safe_callback,
     sanitize_dropdown_value,
+    smart_bar_colors,
 )
 
 dash.register_page(__name__, path="/empaque", name="Empaque")
+bind_date_shortcuts("empaque")
 
 layout = html.Div(
     [
@@ -33,87 +45,13 @@ layout = html.Div(
         html.Div(
             [
                 # Filter bar
-                html.Div(
-                    className="filter-bar",
-                    children=[
-                        html.Div(
-                            [
-                                html.Div("CAMPAÑA", className="filter-label"),
-                                dcc.Dropdown(
-                                    id="empaque-campaña",
-                                    options=fetch_options("campanas", "campanas"),
-                                    value="",
-                                    clearable=True,
-                                    placeholder="Todas",
-                                    style={"minWidth": "110px", "fontSize": "13px"},
-                                ),
-                            ],
-                            className="filter-group",
-                        ),
-                        html.Div(
-                            [
-                                html.Div("DESDE", className="filter-label"),
-                                dcc.DatePickerSingle(
-                                    id="empaque-fecha-desde",
-                                    date="2024-03-01",
-                                    display_format="DD/MM/YY",
-                                ),
-                            ],
-                            className="filter-group",
-                        ),
-                        html.Div(
-                            [
-                                html.Div("HASTA", className="filter-label"),
-                                dcc.DatePickerSingle(
-                                    id="empaque-fecha-hasta",
-                                    date="2024-11-30",
-                                    display_format="DD/MM/YY",
-                                ),
-                            ],
-                            className="filter-group",
-                        ),
-                        html.Div(
-                            [
-                                html.Div("FINCA", className="filter-label"),
-                                dcc.Dropdown(
-                                    id="empaque-finca",
-                                    options=fetch_options("fincas", "fincas"),
-                                    value="",
-                                    clearable=True,
-                                    placeholder="Todas",
-                                    style={"minWidth": "150px", "fontSize": "13px"},
-                                ),
-                            ],
-                            className="filter-group",
-                        ),
-                        html.Div(
-                            [
-                                html.Div("LOTE", className="filter-label"),
-                                dcc.Dropdown(
-                                    id="empaque-lote",
-                                    options=fetch_options("lotes", "lotes"),
-                                    value="",
-                                    clearable=True,
-                                    placeholder="Todos",
-                                    style={"minWidth": "130px", "fontSize": "13px"},
-                                ),
-                            ],
-                            className="filter-group",
-                        ),
-                        html.Div(
-                            [
-                                html.Div("CALIBRE", className="filter-label"),
-                                dcc.Dropdown(
-                                    id="empaque-calibre",
-                                    options=fetch_options("calibres", "calibres"),
-                                    value="",
-                                    clearable=True,
-                                    placeholder="Todos",
-                                    style={"minWidth": "120px", "fontSize": "13px"},
-                                ),
-                            ],
-                            className="filter-group",
-                        ),
+                render_filter_bar(
+                    [
+                        campaign_filter("empaque-campaña", width="110px"),
+                        date_range_filter("empaque", "2024-03-01", "2024-11-30"),
+                        dropdown_filter("FINCA", "empaque-finca", fetch_options("fincas", "fincas"), width="150px"),
+                        dropdown_filter("LOTE", "empaque-lote", fetch_options("lotes", "lotes"), width="130px"),
+                        dropdown_filter("CALIBRE", "empaque-calibre", fetch_options("calibres", "calibres"), width="120px"),
                         html.Div(
                             [
                                 html.Div("TURNO", className="filter-label"),
@@ -156,7 +94,7 @@ layout = html.Div(
                             ],
                             className="filter-group",
                         ),
-                    ],
+                    ]
                 ),
                 # KPI rows
                 html.Div(id="empaque-kpi-row-1", className="kpi-row"),
@@ -166,11 +104,24 @@ layout = html.Div(
                 dbc.Row(
                     [
                         dbc.Col(
-                            drilldown_chart_card("Flujo del Proceso de Empaque", "empaque-chart-flujo", "empaque", "flujo_proceso"),
+                            drilldown_chart_card(
+                                "Conversión del proceso de empaque",
+                                "empaque-chart-flujo",
+                                "empaque",
+                                "flujo_proceso",
+                                subtitle="Del ingreso inicial al destino final para leer merma y aprovechamiento",
+                            ),
                             width=5,
                         ),
                         dbc.Col(
-                            drilldown_chart_card("Rendimiento Exportable por Lote", "empaque-chart-lote", "empaque", "rendimiento_por_lote"),
+                            drilldown_chart_card(
+                                "Rendimiento exportable por lote",
+                                "empaque-chart-lote",
+                                "empaque",
+                                "rendimiento_por_lote",
+                                subtitle="Ranking operativo de los lotes que mejor convierten a exportación",
+                                priority="primary",
+                            ),
                             width=7,
                         ),
                     ],
@@ -180,15 +131,33 @@ layout = html.Div(
                 dbc.Row(
                     [
                         dbc.Col(
-                            drilldown_chart_card("Rendimiento por Calibre", "empaque-chart-calibre", "empaque", "rendimiento_por_calibre"),
+                            drilldown_chart_card(
+                                "Rendimiento por calibre",
+                                "empaque-chart-calibre",
+                                "empaque",
+                                "rendimiento_por_calibre",
+                                subtitle="Relación entre volumen y calidad exportable por tamaño",
+                            ),
                             width=4,
                         ),
                         dbc.Col(
-                            drilldown_chart_card("Productividad por Turno (cajas/hora)", "empaque-chart-turno", "empaque", "productividad_turno"),
+                            drilldown_chart_card(
+                                "Productividad por turno",
+                                "empaque-chart-turno",
+                                "empaque",
+                                "productividad_turno",
+                                subtitle="Cajas por hora según dotación y horas efectivas",
+                            ),
                             width=4,
                         ),
                         dbc.Col(
-                            drilldown_chart_card("Exportable por Finca (%)", "empaque-chart-finca", "empaque", "comparacion_fincas"),
+                            drilldown_chart_card(
+                                "Tasa exportable por finca",
+                                "empaque-chart-finca",
+                                "empaque",
+                                "comparacion_fincas",
+                                subtitle="Comparación de conversión por origen de fruta",
+                            ),
                             width=4,
                         ),
                     ],
@@ -198,7 +167,13 @@ layout = html.Div(
                 dbc.Row(
                     [
                         dbc.Col(
-                            drilldown_chart_card("Descarte por Semana", "empaque-chart-descarte", "empaque", "descarte_por_semana"),
+                            drilldown_chart_card(
+                                "Descarte semanal",
+                                "empaque-chart-descarte",
+                                "empaque",
+                                "descarte_por_semana",
+                                subtitle="Seguimiento de merma para detectar semanas con presión de calidad",
+                            ),
                             width=12,
                         ),
                     ],
@@ -222,6 +197,7 @@ layout = html.Div(
 
 
 @callback(
+    Output("empaque-campaña", "options"),
     Output("empaque-finca", "options"),
     Output("empaque-lote", "options"),
     Output("empaque-calibre", "options"),
@@ -231,27 +207,16 @@ layout = html.Div(
     Input("empaque-campaña", "value"),
     Input("empaque-fecha-desde", "date"),
     Input("empaque-fecha-hasta", "date"),
-    Input("empaque-finca", "value"),
-    Input("empaque-lote", "value"),
-    Input("empaque-calibre", "value"),
-    Input("empaque-turno", "value"),
-    Input("empaque-linea", "value"),
-    Input("empaque-calidad", "value"),
 )
-def update_empaque_filter_options(campaña, fecha_desde, fecha_hasta, finca, lote, calibre, turno, linea, calidad):
+def update_empaque_filter_options(campaña, fecha_desde, fecha_hasta):
     options = panel_filter_options(
         "empaque",
         campaña=campaña,
         fecha_desde=fecha_desde,
         fecha_hasta=fecha_hasta,
-        finca=finca,
-        lote=lote,
-        calibre=calibre,
-        turno=turno,
-        linea=linea,
-        calidad=calidad,
     )
     return (
+        build_options(options.get("campaña", []), all_label="Todas"),
         build_options(options.get("finca", []), all_label="Todas"),
         build_options(options.get("lote", []), all_label="Todos"),
         build_options(options.get("calibre", []), all_label="Todos"),
@@ -353,6 +318,15 @@ def sync_empaque_filter_values(
     Input("empaque-linea", "value"),
     Input("empaque-calidad", "value"),
 )
+@safe_callback(
+    lambda: page_failure_outputs(
+        "Empaque",
+        kpi_blocks=3,
+        chart_heights=[400, 430, 340, 340, 340, 360],
+        insights_title="Insights de empaque",
+    ),
+    "empaque",
+)
 def update_empaque(campaña, fecha_desde, fecha_hasta, finca, lote, calibre, turno, linea, calidad):
     params = filter_params(
         campaña=campaña,
@@ -366,6 +340,15 @@ def update_empaque(campaña, fecha_desde, fecha_hasta, finca, lote, calibre, tur
         calidad=calidad,
     )
     data = api_get("/api/empaque", params=params)
+    request_error = data.get("_request_error")
+    if request_error:
+        return page_failure_outputs(
+            "Empaque",
+            kpi_blocks=3,
+            chart_heights=[400, 430, 340, 340, 340, 360],
+            insights_title="Insights de empaque",
+            message=request_error,
+        )
 
     kpis = data.get("kpis", {})
     flujo = data.get("flujo_proceso", [])
@@ -376,6 +359,16 @@ def update_empaque(campaña, fecha_desde, fecha_hasta, finca, lote, calibre, tur
     comp_fincas = data.get("comparacion_fincas", [])
     tabla = data.get("tabla", [])
     insights = data.get("insights", [])
+
+    if not any([flujo, rend_lote, rend_calibre, prod_turno, desc_semana, comp_fincas, tabla]):
+        return page_empty_outputs(
+            "Empaque",
+            path="/empaque",
+            kpi_blocks=3,
+            chart_heights=[400, 430, 340, 340, 340, 360],
+            insights_title="Insights de empaque",
+            campaña=campaña,
+        )
 
     # KPI row 1
     kg_ing = kpis.get("kg_ingresados", 0) or 0
@@ -423,131 +416,187 @@ def update_empaque(campaña, fecha_desde, fecha_hasta, finca, lote, calibre, tur
         className="g-3",
     )
 
-    # Chart 1: Flujo proceso (funnel with horizontal bars)
+    # Chart 1: Flujo proceso
     if flujo:
         etapas = [d.get("etapa", "") for d in flujo]
         kg_vals = [d.get("kg", 0) for d in flujo]
-        colors_flujo = ["#2E6B47", "#4A9B6A", "#7EC8A0", "#F59E0B", "#EF4444"]
+        ingreso_base = kg_vals[0] if kg_vals else 0
+        colors_flujo = [CHART_COLORS[0], CHART_COLORS[1], CHART_COLORS[2], CHART_COLORS[4]]
         fig_flujo = go.Figure(
             go.Bar(
                 y=etapas,
                 x=kg_vals,
                 orientation="h",
-                marker_color=colors_flujo[:len(etapas)],
-                text=[f"{v:,.0f} kg" for v in kg_vals],
+                marker_color=colors_flujo[: len(etapas)],
+                text=[f"{(v / ingreso_base * 100):.1f}%" if ingreso_base else "" for v in kg_vals],
                 textposition="outside",
+                customdata=[(v / ingreso_base * 100) if ingreso_base else 0 for v in kg_vals],
+                hovertemplate="<b>%{y}</b><br>Kg: %{x:,.0f}<br>Participación: %{customdata:.1f}%<extra></extra>",
             )
         )
+        if len(kg_vals) >= 2 and ingreso_base:
+            merma_pct = max(0, 100 - (kg_vals[1] / ingreso_base * 100))
+            add_metric_badge(fig_flujo, f"Merma total del proceso: {merma_pct:.1f}%", tone="warning")
     else:
-        fig_flujo = empty_figure()
+        fig_flujo = empty_figure(height=400)
 
-    fig_flujo.update_layout(**chart_layout(height=280))
+    fig_flujo.update_layout(**chart_layout(height=400, showlegend=False))
     fig_flujo.update_layout(
         showlegend=False,
-        margin=dict(l=120, r=60, t=40, b=40),
+        margin=dict(l=130, r=36, t=28, b=34),
         yaxis=dict(showgrid=False, showline=False),
-        xaxis=dict(showgrid=True, gridcolor="#F3F4F6"),
+        xaxis=dict(showgrid=True, gridcolor="rgba(65, 86, 61, 0.08)", title="Kg"),
     )
 
-    # Chart 2: Rendimiento por lote (bar)
+    # Chart 2: Rendimiento por lote
     if rend_lote:
         sorted_rl = sorted(rend_lote, key=lambda x: x.get("pct_exportable", 0), reverse=True)[:12]
         lotes_r = [f"{d.get('lote','')} ({d.get('finca','')})" for d in sorted_rl]
         pct_vals = [d.get("pct_exportable", 0) for d in sorted_rl]
+        best_lote_idx = best_index(pct_vals) or 0
         fig_lote = go.Figure(
             go.Bar(
-                x=lotes_r,
-                y=pct_vals,
-                marker_color=[
-                    "#22C55E" if v >= 70 else ("#F59E0B" if v >= 55 else "#EF4444")
-                    for v in pct_vals
-                ],
+                y=lotes_r,
+                x=pct_vals,
+                orientation="h",
+                customdata=[[d.get("pct_industria", 0), d.get("pct_descarte", 0)] for d in sorted_rl],
+                marker_color=smart_bar_colors(pct_vals, highlight=best_lote_idx),
                 text=[f"{v:.1f}%" for v in pct_vals],
                 textposition="outside",
+                hovertemplate="<b>%{y}</b><br>Exportable: %{x:.1f}%<br>Industria: %{customdata[0]:.1f}%<br>Descarte: %{customdata[1]:.1f}%<extra></extra>",
             )
         )
+        fig_lote.add_vline(
+            x=sum(pct_vals) / len(pct_vals),
+            line_color=CHART_COLORS[2],
+            line_dash="dot",
+            annotation_text="promedio",
+            annotation_position="top",
+        )
+        add_metric_badge(
+            fig_lote,
+            f"{sorted_rl[best_lote_idx]['lote']} convierte {pct_vals[best_lote_idx]:.1f}% a exportación",
+            tone="primary",
+        )
     else:
-        fig_lote = empty_figure()
+        fig_lote = empty_figure(height=430)
 
-    fig_lote.update_layout(**chart_layout(height=300))
-    fig_lote.update_layout(yaxis_title="% Exportable", showlegend=False)
+    fig_lote.update_layout(**chart_layout(height=430, emphasis="hero", showlegend=False))
+    fig_lote.update_layout(
+        xaxis_title="% exportable",
+        margin=dict(l=182, r=28, t=28, b=34),
+        yaxis=dict(showgrid=False, showline=False),
+    )
 
     # Chart 3: Rendimiento por calibre
     if rend_calibre:
         calibres = [d.get("calibre", "") for d in rend_calibre]
         pct_c = [d.get("pct_exportable", 0) for d in rend_calibre]
+        kg_total_calibre = [d.get("kg_total", 0) for d in rend_calibre]
+        best_calibre_idx = best_index(pct_c) or 0
         fig_calibre = go.Figure(
             go.Bar(
                 x=calibres,
                 y=pct_c,
-                marker_color="#4A9B6A",
+                customdata=kg_total_calibre,
+                marker_color=smart_bar_colors(pct_c, highlight=best_calibre_idx),
                 text=[f"{v:.1f}%" for v in pct_c],
                 textposition="outside",
+                hovertemplate="<b>Calibre %{x}</b><br>Exportable: %{y:.1f}%<br>Kg procesados: %{customdata:,.0f}<extra></extra>",
             )
         )
+        add_reference_line(fig_calibre, sum(pct_c) / len(pct_c), "promedio")
+        add_metric_badge(
+            fig_calibre,
+            f"Calibre {calibres[best_calibre_idx]} lidera con {pct_c[best_calibre_idx]:.1f}% exportable",
+            tone="primary",
+        )
     else:
-        fig_calibre = empty_figure()
+        fig_calibre = empty_figure(height=340)
 
-    fig_calibre.update_layout(**chart_layout(height=280))
+    fig_calibre.update_layout(**chart_layout(height=340, showlegend=False))
     fig_calibre.update_layout(yaxis_title="% Exportable", showlegend=False)
 
     # Chart 4: Productividad por turno
     if prod_turno:
         turnos = [d.get("turno", "") for d in prod_turno]
         cj_hora = [d.get("cajas_hora", 0) for d in prod_turno]
+        horas_totales = [d.get("horas_totales", 0) for d in prod_turno]
+        best_turno_idx = best_index(cj_hora) or 0
         fig_turno = go.Figure(
             go.Bar(
                 x=turnos,
                 y=cj_hora,
-                marker_color="#8B6914",
+                customdata=horas_totales,
+                marker_color=smart_bar_colors(cj_hora, positive=CHART_COLORS[2], neutral=CHART_COLORS[3], highlight=best_turno_idx),
                 text=[f"{v:.1f}" for v in cj_hora],
                 textposition="outside",
+                hovertemplate="<b>%{x}</b><br>Cajas por hora: %{y:.1f}<br>Horas efectivas: %{customdata:,.0f}<extra></extra>",
             )
         )
+        add_metric_badge(fig_turno, f"{turnos[best_turno_idx]} lidera la productividad", tone="primary")
     else:
-        fig_turno = empty_figure()
+        fig_turno = empty_figure(height=340)
 
-    fig_turno.update_layout(**chart_layout(height=280))
+    fig_turno.update_layout(**chart_layout(height=340, showlegend=False))
     fig_turno.update_layout(yaxis_title="Cajas/Hora", showlegend=False)
 
     # Chart 5: Exportable por finca
     if comp_fincas:
-        fincas_c = [d.get("finca", "") for d in comp_fincas]
-        pct_f = [d.get("pct_exportable", 0) for d in comp_fincas]
+        sorted_fincas = sorted(comp_fincas, key=lambda item: item.get("pct_exportable", 0), reverse=True)
+        fincas_c = [d.get("finca", "") for d in sorted_fincas]
+        pct_f = [d.get("pct_exportable", 0) for d in sorted_fincas]
+        kg_finca = [d.get("kg_ingresados", 0) for d in sorted_fincas]
+        best_finca_idx = best_index(pct_f) or 0
         fig_finca = go.Figure(
             go.Bar(
                 x=fincas_c,
                 y=pct_f,
-                marker_color=CHART_COLORS[:len(fincas_c)],
+                customdata=kg_finca,
+                marker_color=smart_bar_colors(pct_f, highlight=best_finca_idx),
                 text=[f"{v:.1f}%" for v in pct_f],
                 textposition="outside",
+                hovertemplate="<b>%{x}</b><br>Exportable: %{y:.1f}%<br>Kg ingresados: %{customdata:,.0f}<extra></extra>",
             )
         )
+        add_reference_line(fig_finca, sum(pct_f) / len(pct_f), "promedio")
+        add_metric_badge(fig_finca, f"{fincas_c[best_finca_idx]} lidera la conversión", tone="primary")
     else:
-        fig_finca = empty_figure()
+        fig_finca = empty_figure(height=340)
 
-    fig_finca.update_layout(**chart_layout(height=280))
+    fig_finca.update_layout(**chart_layout(height=340, showlegend=False))
     fig_finca.update_layout(yaxis_title="% Exportable", showlegend=False)
 
     # Chart 6: Descarte por semana (line)
     if desc_semana:
-        semanas = [d.get("semana", "") for d in desc_semana]
+        semanas = [format_week_label(d.get("semana", "")) for d in desc_semana]
         kg_desc_vals = [d.get("kg_descarte", 0) for d in desc_semana]
+        peak_desc_idx = best_index(kg_desc_vals) or 0
         fig_desc = go.Figure(
             go.Scatter(
                 x=semanas,
                 y=kg_desc_vals,
                 mode="lines+markers",
                 name="Kg Descarte",
-                line=dict(color="#EF4444", width=2),
+                line=dict(color=CHART_COLORS[4], width=2.7),
+                marker=dict(size=7, color=CHART_COLORS[4]),
                 fill="tozeroy",
-                fillcolor="rgba(239,68,68,0.07)",
+                fillcolor="rgba(194,106,69,0.10)",
+                hovertemplate="<b>%{x}</b><br>Kg descarte: %{y:,.0f}<extra></extra>",
             )
         )
+        add_reference_line(fig_desc, sum(kg_desc_vals) / len(kg_desc_vals), "promedio")
+        add_peak_annotation(
+            fig_desc,
+            semanas[peak_desc_idx],
+            kg_desc_vals[peak_desc_idx],
+            f"Pico {compact_number(kg_desc_vals[peak_desc_idx], ' kg')}",
+        )
+        add_metric_badge(fig_desc, f"Mayor presión de descarte en {semanas[peak_desc_idx]}", tone="danger")
     else:
-        fig_desc = empty_figure()
+        fig_desc = empty_figure(height=360)
 
-    fig_desc.update_layout(**chart_layout(height=260))
+    fig_desc.update_layout(**chart_layout(height=360, showlegend=False, unified_hover=True))
     fig_desc.update_layout(yaxis_title="Kg Descarte", showlegend=False)
 
     insights_comp = insights_panel("Insights de empaque", insights)

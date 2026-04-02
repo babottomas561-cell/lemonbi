@@ -1,17 +1,36 @@
 import os
 import time
-from functools import lru_cache
+import logging
+from functools import lru_cache, wraps
 
 import plotly.graph_objects as go
 import requests
 from dash import html
 
+from frontend.components.empty_state import empty_state, error_state, panel_notice
+from frontend.chart_theme import (
+    CHART_COLORS,
+    add_donut_center_label,
+    add_metric_badge,
+    add_peak_annotation,
+    add_reference_line,
+    best_index,
+    chart_layout,
+    compact_number,
+    donut_layout,
+    empty_figure,
+    error_figure,
+    register_plotly_theme,
+    smart_bar_colors,
+)
+
 API_BASE = os.getenv("LEMON_API_BASE", "http://127.0.0.1:8000").rstrip("/")
-CHART_COLORS = ["#3F6B4B", "#6C8C5A", "#B69245", "#D8C9A5", "#95B29E", "#C26A45", "#78856A"]
 REQUEST_CACHE_TTL = 8
 REQUEST_CACHE_MAX = 256
 _HTTP = requests.Session()
 _REQUEST_CACHE: dict[tuple, tuple[float, dict]] = {}
+LOGGER = logging.getLogger(__name__)
+register_plotly_theme()
 
 
 def _cache_key(path: str, params=None) -> tuple:
@@ -41,8 +60,18 @@ def api_get(path: str, params=None, timeout: int = 10) -> dict:
         _REQUEST_CACHE[key] = (now, data)
         _prune_request_cache()
         return data
+    except requests.Timeout:
+        LOGGER.warning("API timeout on %s with params=%s", path, params)
+        return {"_request_error": "La fuente de datos demoró demasiado en responder."}
+    except requests.RequestException:
+        LOGGER.exception("API request failed on %s with params=%s", path, params)
+        return {"_request_error": "No se pudo conectar con el backend del panel."}
+    except ValueError:
+        LOGGER.exception("Invalid API response on %s with params=%s", path, params)
+        return {"_request_error": "La respuesta del backend no fue válida."}
     except Exception:
-        return {}
+        LOGGER.exception("Unexpected API error on %s with params=%s", path, params)
+        return {"_request_error": "Ocurrió un error inesperado al cargar la información."}
 
 
 @lru_cache(maxsize=64)
@@ -72,49 +101,17 @@ def panel_filter_options(panel: str, **kwargs) -> dict:
     return api_get(f"/api/filtros/panel/{panel}", params=filter_params(**kwargs), timeout=2)
 
 
+@lru_cache(maxsize=1)
+def available_campaigns() -> tuple[str, ...]:
+    options = fetch_options("campanas", "campanas")
+    return tuple(str(option["value"]) for option in options if option.get("value"))
+
+
 def sanitize_dropdown_value(value, options: list[dict], fallback: str = ""):
     valid_values = {str(option.get("value", "")) for option in options}
     if value in [None, "", "Todos"]:
         return fallback
     return value if str(value) in valid_values else fallback
-
-
-def chart_layout(title: str = "", height: int = 320) -> dict:
-    return dict(
-        title=dict(text=title, font=dict(size=13, color="#243126", family="Manrope")),
-        height=height,
-        margin=dict(l=36, r=18, t=42, b=36),
-        plot_bgcolor="#FFFCF7",
-        paper_bgcolor="#FFFCF7",
-        font=dict(family="Manrope, Segoe UI, sans-serif", size=12, color="#5E675E"),
-        xaxis=dict(showgrid=False, showline=True, linecolor="#E7E1D4", tickangle=-45, automargin=True),
-        yaxis=dict(gridcolor="#EEE8DD", showline=False, zeroline=False, automargin=True),
-        showlegend=True,
-        legend=dict(font=dict(size=11), orientation="h", y=-0.18),
-        colorway=CHART_COLORS,
-    )
-
-
-def empty_figure(message: str = "Sin datos para estos filtros") -> go.Figure:
-    fig = go.Figure()
-    fig.add_annotation(
-        text=message,
-        x=0.5,
-        y=0.5,
-        xref="paper",
-        yref="paper",
-        showarrow=False,
-        font=dict(size=13, color="#7A8376", family="Manrope"),
-    )
-    fig.update_layout(
-        height=300,
-        margin=dict(l=10, r=10, t=20, b=10),
-        paper_bgcolor="#FFFCF7",
-        plot_bgcolor="#FFFCF7",
-        xaxis=dict(visible=False),
-        yaxis=dict(visible=False),
-    )
-    return fig
 
 
 def insights_panel(title: str, insights: list[str]) -> html.Div:
@@ -132,6 +129,119 @@ def filter_params(**kwargs) -> dict:
     return {key: (value or "") for key, value in kwargs.items()}
 
 
+def empty_context_message(campaña: str | None = None) -> str:
+    campaigns = available_campaigns()
+    if not campaigns:
+        return ""
+    if len(campaigns) == 1:
+        only = campaigns[0]
+        if campaña and campaña != only:
+            return f"Los datos disponibles comienzan desde la campaña {only}."
+        return f"Los datos disponibles comienzan desde la campaña {only}."
+    first_campaign = campaigns[0]
+    last_campaign = campaigns[-1]
+    if campaña:
+        return f"Los datos disponibles abarcan campañas {first_campaign} a {last_campaign}. Revisá también el rango de fechas."
+    return f"Los datos disponibles abarcan campañas {first_campaign} a {last_campaign}."
+
+
+def empty_state_actions(path: str) -> list[html.A]:
+    return [
+        html.A("Limpiar filtros", href=path, className="empty-state-button"),
+    ]
+
+
+def panel_empty_state(
+    panel_name: str,
+    path: str,
+    campaña: str | None = None,
+    message: str = "No se registraron datos para los filtros seleccionados",
+):
+    return empty_state(
+        title="No hay datos disponibles",
+        message=message,
+        context=empty_context_message(campaña),
+        actions=empty_state_actions(path),
+    )
+
+
+def safe_callback(fallback_factory, label: str = "callback"):
+    def decorator(func):
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            try:
+                return func(*args, **kwargs)
+            except Exception:
+                LOGGER.exception("Frontend callback failed: %s", label)
+                return fallback_factory()
+
+        return wrapper
+
+    return decorator
+
+
+def page_failure_outputs(
+    panel_name: str,
+    *,
+    kpi_blocks: int,
+    chart_heights: list[int],
+    insights_title: str,
+    message: str = "No fue posible actualizar este panel con la selección actual.",
+):
+    kpi_notice = panel_notice(
+        title=f"{panel_name} temporalmente no disponible",
+        message=message,
+        tone="error",
+    )
+    kpi_outputs = [kpi_notice] + [html.Div() for _ in range(max(0, kpi_blocks - 1))]
+    chart_outputs = [
+        error_figure("No se pudo cargar este visual con la información actual.", height=height)
+        for height in chart_heights
+    ]
+    insights_output = insights_panel(
+        insights_title,
+        ["No fue posible actualizar este panel. Recargá la vista o revisá la conexión con el backend."],
+    )
+    table_output = error_state(
+        title="No se pudo cargar el detalle",
+        message="Intentá nuevamente en unos segundos o ajustá los filtros para volver a consultar.",
+    )
+    return (*kpi_outputs, *chart_outputs, insights_output, table_output)
+
+
+def page_empty_outputs(
+    panel_name: str,
+    *,
+    path: str,
+    kpi_blocks: int,
+    chart_heights: list[int],
+    insights_title: str,
+    campaña: str | None = None,
+):
+    context_message = empty_context_message(campaña)
+    banner = panel_empty_state(panel_name, path=path, campaña=campaña)
+    kpi_outputs = [banner] + [html.Div() for _ in range(max(0, kpi_blocks - 1))]
+    chart_outputs = [
+        empty_figure(
+            "No se registraron datos para los filtros seleccionados.",
+            height=height,
+            context=context_message,
+        )
+        for height in chart_heights
+    ]
+    insights_output = insights_panel(
+        insights_title,
+        ["No hay insights disponibles porque no se registraron datos para la selección actual."],
+    )
+    table_output = empty_state(
+        title="No hay datos disponibles",
+        message="No se registraron datos para los filtros seleccionados",
+        context=context_message,
+        actions=empty_state_actions(path),
+    )
+    return (*kpi_outputs, *chart_outputs, insights_output, table_output)
+
+
 def fmt_int(value) -> str:
     return f"{float(value or 0):,.0f}"
 
@@ -146,3 +256,42 @@ def fmt_ars(value, digits: int = 0) -> str:
 
 def fmt_usd(value, digits: int = 0) -> str:
     return f"USD {float(value or 0):,.{digits}f}"
+
+
+MONTH_LABELS = {
+    "01": "Ene",
+    "02": "Feb",
+    "03": "Mar",
+    "04": "Abr",
+    "05": "May",
+    "06": "Jun",
+    "07": "Jul",
+    "08": "Ago",
+    "09": "Sep",
+    "10": "Oct",
+    "11": "Nov",
+    "12": "Dic",
+}
+
+
+def format_month_label(value: str) -> str:
+    raw = str(value or "")
+    if len(raw) == 7 and raw[4] == "-":
+        return MONTH_LABELS.get(raw[-2:], raw)
+    return raw
+
+
+def format_week_label(value: str) -> str:
+    raw = str(value or "")
+    if "-W" in raw:
+        return f"Sem {raw.split('-W')[-1]}"
+    return raw
+
+
+def format_period_label(value: str) -> str:
+    raw = str(value or "")
+    if "-W" in raw:
+        return format_week_label(raw)
+    if len(raw) == 7 and raw[4] == "-":
+        return format_month_label(raw)
+    return raw

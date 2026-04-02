@@ -1,6 +1,8 @@
 """Reusable DataTable component."""
 from dash import dash_table, html
 
+from frontend.components.empty_state import empty_state
+
 
 def render_table(data, columns, table_id, page_size=12, max_rows=80):
     """
@@ -9,8 +11,11 @@ def render_table(data, columns, table_id, page_size=12, max_rows=80):
     """
     if not data:
         return html.Div(
-            "Sin datos para mostrar",
-            style={"padding": "20px", "color": "#6B7280", "fontSize": "13px"},
+            empty_state(
+                title="Sin detalle para mostrar",
+                message="No hay filas disponibles para los filtros seleccionados.",
+            ),
+            className="table-empty-wrapper",
         )
 
     visible_data = data[:max_rows]
@@ -18,7 +23,7 @@ def render_table(data, columns, table_id, page_size=12, max_rows=80):
     if len(data) > max_rows:
         note = html.Div(
             f"Mostrando {max_rows} de {len(data)} filas para mantener fluidez.",
-            style={"padding": "0 0 12px", "fontSize": "12px", "color": "#7A8376"},
+            className="table-note",
         )
 
     return html.Div(
@@ -32,25 +37,27 @@ def render_table(data, columns, table_id, page_size=12, max_rows=80):
                 page_action="native",
                 sort_action="native",
                 filter_action="native",
-                style_table={"overflowX": "auto", "maxHeight": "540px", "overflowY": "auto"},
+                style_table={"overflowX": "auto", "maxHeight": "540px", "overflowY": "auto", "backgroundColor": "transparent"},
                 fixed_rows={"headers": True},
+                style_as_list_view=True,
                 style_header={
-                    "backgroundColor": "#F9FAFB",
-                    "fontWeight": "600",
+                    "backgroundColor": "rgba(248, 244, 235, 0.88)",
+                    "fontWeight": "700",
                     "fontSize": "11.5px",
                     "color": "#6B7280",
                     "textTransform": "uppercase",
-                    "letterSpacing": "0.4px",
+                    "letterSpacing": "0.7px",
                     "border": "none",
-                    "borderBottom": "1px solid #E5E7EB",
-                    "padding": "10px 14px",
+                    "borderBottom": "1px solid rgba(78, 90, 67, 0.1)",
+                    "padding": "12px 14px",
                 },
                 style_cell={
                     "fontSize": "13px",
                     "color": "#1A1A1A",
+                    "backgroundColor": "transparent",
                     "border": "none",
-                    "borderBottom": "1px solid #F3F4F6",
-                    "padding": "10px 14px",
+                    "borderBottom": "1px solid rgba(78, 90, 67, 0.06)",
+                    "padding": "12px 14px",
                     "fontFamily": "'Source Sans 3', 'Segoe UI', sans-serif",
                     "whiteSpace": "normal",
                     "maxWidth": "220px",
@@ -58,13 +65,15 @@ def render_table(data, columns, table_id, page_size=12, max_rows=80):
                     "textOverflow": "ellipsis",
                 },
                 style_data_conditional=[
-                    {"if": {"row_index": "odd"}, "backgroundColor": "#FAFBF9"},
+                    {"if": {"row_index": "odd"}, "backgroundColor": "rgba(255, 255, 255, 0.42)"},
+                    {"if": {"state": "active"}, "backgroundColor": "rgba(77, 104, 77, 0.08)", "border": "none"},
+                    {"if": {"state": "selected"}, "backgroundColor": "rgba(77, 104, 77, 0.1)", "border": "none"},
                 ],
                 style_filter={
                     "fontSize": "12px",
-                    "backgroundColor": "#F9FAFB",
+                    "backgroundColor": "rgba(248, 244, 235, 0.74)",
                     "border": "none",
-                    "borderBottom": "1px solid #E5E7EB",
+                    "borderBottom": "1px solid rgba(78, 90, 67, 0.1)",
                 },
             ),
         ]

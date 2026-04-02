@@ -5,11 +5,13 @@ import dash_bootstrap_components as dbc
 from dash import Input, Output, dcc, html
 
 from frontend.auth import current_user, register_auth
+from frontend.chart_theme import register_plotly_theme
 from frontend.components.drilldown import render_drilldown_modal
 from frontend.components.sidebar import render_sidebar
 from frontend.drilldown import register_drilldown_callbacks
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+register_plotly_theme()
 
 app = dash.Dash(
     __name__,
@@ -25,20 +27,19 @@ register_auth(server)
 
 
 app.layout = html.Div(
-    id="app-container",
+    id="app-root",
     children=[
-        html.Div(className="app-ambient app-ambient-a"),
-        html.Div(className="app-ambient app-ambient-b"),
-        dcc.Location(id="app-location"),
-        html.Div(id="sidebar-shell"),
         html.Div(
-            id="main-content",
+            id="app-container",
             children=[
-                dcc.Loading(
-                    type="default",
-                    color="#516C53",
-                    children=html.Div(dash.page_container, id="page-shell"),
-                )
+                html.Div(className="app-ambient app-ambient-a"),
+                html.Div(className="app-ambient app-ambient-b"),
+                dcc.Location(id="app-location"),
+                html.Div(id="sidebar-shell"),
+                html.Div(
+                    id="main-content",
+                    children=[html.Div(dash.page_container, id="page-shell")],
+                ),
             ],
         ),
         render_drilldown_modal(),

@@ -25,6 +25,7 @@ from backend.services.loaders import (
 )
 from backend.services.metrics import safe_div
 from backend.services.performance import cache_response
+from backend.services.profitability import estimated_margin_summary
 
 FILTER_LABELS = {
     "campaña": "Campaña",
@@ -812,28 +813,16 @@ def _costos_detail(kind: str, item: str, filters: dict) -> dict:
         if item in {"margen_bruto_usd", "margen_bruto_pct", "mejor_lote"}:
             return _payload("Margen por lote", "Tabla base de ingresos y costos directos por lote utilizada para rentabilidad.", _costos_margin_table(filters).sort_values("margen_pct", ascending=False), filters, "costos_margen_lote")
         if item == "mejor_canal":
-            avg_tc = float(df_com["tipo_cambio"].mean()) if not df_com.empty and "tipo_cambio" in df_com.columns else 1.0
-            if avg_tc == 0:
-                avg_tc = 1.0
-            revenue = df_com.groupby("canal")["importe_usd"].sum().reset_index() if not df_com.empty else pd.DataFrame(columns=["canal", "importe_usd"])
-            direct = df_cos[df_cos["canal"] != "General"].groupby("canal")["importe"].sum().reset_index()
-            general_cost = float(df_cos[df_cos["canal"] == "General"]["importe"].sum())
-            if revenue.empty and direct.empty:
-                grouped = pd.DataFrame(columns=["canal", "costo_total", "ingreso_usd", "margen_pct"])
-            else:
-                grouped = direct.merge(revenue, on="canal", how="outer").fillna(0)
-                revenue_total = float(grouped["importe_usd"].sum())
-                if revenue_total > 0:
-                    grouped["costo_total"] = grouped.apply(lambda row: float(row["importe"]) + safe_div(float(row["importe_usd"]), revenue_total) * general_cost, axis=1)
-                else:
-                    direct_total = float(grouped["importe"].sum())
-                    grouped["costo_total"] = grouped.apply(lambda row: float(row["importe"]) + safe_div(float(row["importe"]), direct_total) * general_cost, axis=1)
-                grouped["margen_pct"] = grouped.apply(
-                    lambda row: round(safe_div(float(row["importe_usd"]) - safe_div(float(row["costo_total"]), avg_tc), float(row["importe_usd"])) * 100, 1) if float(row["importe_usd"]) > 0 else 0.0,
-                    axis=1,
-                )
-                grouped = grouped[["canal", "costo_total", "importe_usd", "margen_pct"]].rename(columns={"importe_usd": "ingreso_usd"})
-            return _payload("Margen por canal", "Rentabilidad por canal considerando reparto de costos generales.", grouped.sort_values("margen_pct", ascending=False), filters, "costos_margen_canal")
+            grouped = estimated_margin_summary(df_com, "canal").rename(
+                columns={"costo_estimado_ars": "costo_total"}
+            )
+            return _payload(
+                "Margen por canal",
+                "Margen comercial estimado por canal, consistente con cliente y destino dentro del panel.",
+                grouped[["canal", "costo_total", "costo_estimado_usd", "ingreso_usd", "margen_usd", "margen_pct"]].sort_values("margen_pct", ascending=False),
+                filters,
+                "costos_margen_canal",
+            )
     if kind == "chart":
         if item == "composicion_costo":
             grouped = df_cos.groupby("centro_costo")["importe"].sum().reset_index().rename(columns={"centro_costo": "tipo"}).sort_values("importe", ascending=False)
@@ -847,12 +836,13 @@ def _costos_detail(kind: str, item: str, filters: dict) -> dict:
             grouped = grouped.rename(columns={"importe": "costo_total"})
             return _payload("Costo por finca", "Costo total y costo por kilo exportable agrupados por finca.", grouped, filters, "costos_por_finca")
         if item == "costo_por_canal":
-            canal_payload = _costos_detail("kpi", "mejor_canal", filters)
-            canal_df = pd.DataFrame(canal_payload.get("rows", []))
+            canal_df = estimated_margin_summary(df_com, "canal").rename(
+                columns={"costo_estimado_ars": "costo_total"}
+            )
             return _payload(
                 "Costo por canal",
-                "Costo total, ingreso y margen por canal con distribución de costos generales.",
-                canal_df,
+                "Costo estimado, ingreso y margen comercial por canal con una lógica consistente de rentabilidad.",
+                canal_df[["canal", "costo_total", "costo_estimado_usd", "ingreso_usd", "margen_usd", "margen_pct"]],
                 filters,
                 "costos_por_canal",
             )
@@ -882,15 +872,23 @@ def _costos_detail(kind: str, item: str, filters: dict) -> dict:
                 "costos_por_lote",
             )
         if item == "margen_por_cliente":
-            grouped = df_com.assign(margen_ponderado=lambda frame: frame["margen_estimado"] * frame["importe_usd"]).groupby("cliente")[["importe_usd", "margen_ponderado"]].sum().reset_index()
-            grouped["margen_pct"] = grouped.apply(lambda row: round(safe_div(float(row["margen_ponderado"]), float(row["importe_usd"])) * 100, 1), axis=1)
-            grouped = grouped.rename(columns={"importe_usd": "ingreso_usd"})
-            return _payload("Margen por cliente", "Margen comercial ponderado por cliente sobre la venta filtrada.", grouped.sort_values("margen_pct", ascending=False), filters, "costos_margen_cliente")
+            grouped = estimated_margin_summary(df_com, "cliente")
+            return _payload(
+                "Margen por cliente",
+                "Margen comercial estimado por cliente con el mismo criterio usado en canal y destino.",
+                grouped.sort_values("margen_pct", ascending=False),
+                filters,
+                "costos_margen_cliente",
+            )
         if item == "margen_por_destino":
-            grouped = df_com.assign(margen_ponderado=lambda frame: frame["margen_estimado"] * frame["importe_usd"]).groupby("destino")[["importe_usd", "margen_ponderado"]].sum().reset_index()
-            grouped["margen_pct"] = grouped.apply(lambda row: round(safe_div(float(row["margen_ponderado"]), float(row["importe_usd"])) * 100, 1), axis=1)
-            grouped = grouped.rename(columns={"importe_usd": "ingreso_usd"})
-            return _payload("Margen por destino", "Margen comercial ponderado por destino de venta.", grouped.sort_values("margen_pct", ascending=False), filters, "costos_margen_destino")
+            grouped = estimated_margin_summary(df_com, "destino")
+            return _payload(
+                "Margen por destino",
+                "Margen comercial estimado por destino con el mismo criterio usado en canal y cliente.",
+                grouped.sort_values("margen_pct", ascending=False),
+                filters,
+                "costos_margen_destino",
+            )
     raise HTTPException(status_code=404, detail="Drill-down no disponible para este elemento.")
 
 
