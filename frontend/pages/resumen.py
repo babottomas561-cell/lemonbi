@@ -4,18 +4,25 @@ from dash import html, dcc, callback, Output, Input, State
 import dash_bootstrap_components as dbc
 import plotly.graph_objects as go
 
-from frontend.components.filter_bar import date_filter, dropdown_filter, render_filter_bar
+from frontend.components.filter_bar import bind_date_shortcuts, campaign_filter, date_range_filter, dropdown_filter, render_filter_bar
 from frontend.components.drilldown import drilldown_chart_card
 from frontend.components.kpi_card import kpi_card
-from frontend.components.loading import loading_graph, loading_slot
+from frontend.components.loading import loading_slot
 from frontend.components.tables import render_table
 from frontend.components.empty_state import empty_state
 from frontend.components.header import render_header
 from frontend.utils import (
     CHART_COLORS,
+    add_donut_center_label,
+    add_metric_badge,
+    add_peak_annotation,
+    add_reference_line,
     api_get,
+    best_index,
     build_options,
     chart_layout,
+    compact_number,
+    donut_layout,
     empty_figure,
     fetch_options,
     filter_params,
@@ -23,11 +30,15 @@ from frontend.utils import (
     fmt_num,
     fmt_usd,
     insights_panel,
+    page_empty_outputs,
+    page_failure_outputs,
     panel_filter_options,
+    safe_callback,
     sanitize_dropdown_value,
 )
 
 dash.register_page(__name__, path="/", name="Resumen Ejecutivo")
+bind_date_shortcuts("resumen")
 
 layout = html.Div(
     [
@@ -41,9 +52,8 @@ layout = html.Div(
             [
                 render_filter_bar(
                     [
-                        dropdown_filter("CAMPAÑA", "resumen-campaña", fetch_options("campanas", "campanas"), width="110px"),
-                        date_filter("DESDE", "resumen-fecha-desde", "2024-03-01"),
-                        date_filter("HASTA", "resumen-fecha-hasta", "2024-11-30"),
+                        campaign_filter("resumen-campaña", width="110px"),
+                        date_range_filter("resumen", "2024-03-01", "2024-11-30"),
                         dropdown_filter("FINCA", "resumen-finca", fetch_options("fincas", "fincas"), width="170px"),
                         dropdown_filter("VARIEDAD", "resumen-variedad", fetch_options("variedades", "variedades"), width="150px"),
                     ]
@@ -55,11 +65,25 @@ layout = html.Div(
                 dbc.Row(
                     [
                         dbc.Col(
-                            drilldown_chart_card("Evolución Semanal de Fruta Ingresada", "resumen-chart-fruta", "resumen", "evolucion_fruta"),
+                            drilldown_chart_card(
+                                "Ingreso semanal de fruta",
+                                "resumen-chart-fruta",
+                                "resumen",
+                                "evolucion_fruta",
+                                subtitle="Volumen recibido en empaque a lo largo de la campaña",
+                                priority="primary",
+                            ),
                             width=7,
                         ),
                         dbc.Col(
-                            drilldown_chart_card("Mix de Destino", "resumen-chart-destino", "resumen", "mix_destino"),
+                            drilldown_chart_card(
+                                "Mix comercial por destino",
+                                "resumen-chart-destino",
+                                "resumen",
+                                "mix_destino",
+                                subtitle="Participación del volumen vendido por canal de salida",
+                                priority="secondary",
+                            ),
                             width=5,
                         ),
                     ],
@@ -69,11 +93,25 @@ layout = html.Div(
                 dbc.Row(
                     [
                         dbc.Col(
-                            drilldown_chart_card("Evolución de Ventas Semanales", "resumen-chart-ventas", "resumen", "evolucion_ventas"),
+                            drilldown_chart_card(
+                                "Facturación semanal",
+                                "resumen-chart-ventas",
+                                "resumen",
+                                "evolucion_ventas",
+                                subtitle="Ventas netas en USD dentro de la ventana seleccionada",
+                                priority="secondary",
+                            ),
                             width=6,
                         ),
                         dbc.Col(
-                            drilldown_chart_card("Margen Bruto por Mes", "resumen-chart-margen", "resumen", "margen_por_mes"),
+                            drilldown_chart_card(
+                                "Ingresos y margen por mes",
+                                "resumen-chart-margen",
+                                "resumen",
+                                "margen_por_mes",
+                                subtitle="Resultado bruto mensual para lectura ejecutiva",
+                                priority="secondary",
+                            ),
                             width=6,
                         ),
                     ],
@@ -97,24 +135,22 @@ layout = html.Div(
 
 
 @callback(
+    Output("resumen-campaña", "options"),
     Output("resumen-finca", "options"),
     Output("resumen-variedad", "options"),
     Input("resumen-campaña", "value"),
     Input("resumen-fecha-desde", "date"),
     Input("resumen-fecha-hasta", "date"),
-    Input("resumen-finca", "value"),
-    Input("resumen-variedad", "value"),
 )
-def update_resumen_filter_options(campaña, fecha_desde, fecha_hasta, finca, variedad):
+def update_resumen_filter_options(campaña, fecha_desde, fecha_hasta):
     options = panel_filter_options(
         "resumen",
         campaña=campaña,
         fecha_desde=fecha_desde,
         fecha_hasta=fecha_hasta,
-        finca=finca,
-        variedad=variedad,
     )
     return (
+        build_options(options.get("campaña", []), all_label="Todas"),
         build_options(options.get("finca", []), all_label="Todas"),
         build_options(options.get("variedad", []), all_label="Todas"),
     )
@@ -168,6 +204,15 @@ def sync_resumen_filter_values(finca_options, variedad_options, finca, variedad)
     Input("resumen-finca", "value"),
     Input("resumen-variedad", "value"),
 )
+@safe_callback(
+    lambda: page_failure_outputs(
+        "Resumen Ejecutivo",
+        kpi_blocks=2,
+        chart_heights=[430, 390, 430, 390],
+        insights_title="Insights automáticos",
+    ),
+    "resumen",
+)
 def update_resumen(campaña, fecha_desde, fecha_hasta, finca, variedad):
     params = filter_params(
         campaña=campaña,
@@ -177,6 +222,15 @@ def update_resumen(campaña, fecha_desde, fecha_hasta, finca, variedad):
         variedad=variedad,
     )
     data = api_get("/api/resumen", params=params)
+    request_error = data.get("_request_error")
+    if request_error:
+        return page_failure_outputs(
+            "Resumen Ejecutivo",
+            kpi_blocks=2,
+            chart_heights=[430, 390, 430, 390],
+            insights_title="Insights automáticos",
+            message=request_error,
+        )
 
     kpis = data.get("kpis", {})
     evolucion_fruta = data.get("evolucion_fruta", [])
@@ -185,6 +239,16 @@ def update_resumen(campaña, fecha_desde, fecha_hasta, finca, variedad):
     margen_por_mes = data.get("margen_por_mes", [])
     tabla_fincas = data.get("tabla_fincas", [])
     insights = data.get("insights", [])
+
+    if not any([evolucion_fruta, evolucion_ventas, mix_destino, margen_por_mes, tabla_fincas]):
+        return page_empty_outputs(
+            "Resumen Ejecutivo",
+            path="/",
+            kpi_blocks=2,
+            chart_heights=[430, 390, 430, 390],
+            insights_title="Insights automáticos",
+            campaña=campaña,
+        )
 
     # --- KPI row 1 ---
     fruta_kg = kpis.get("fruta_ingresada_kg", 0) or 0
@@ -311,14 +375,20 @@ def update_resumen(campaña, fecha_desde, fecha_hasta, finca, variedad):
                 line=dict(color="#2E6B47", width=2.5),
                 marker=dict(size=5, color="#2E6B47"),
                 fill="tozeroy",
-                fillcolor="rgba(46,107,71,0.07)",
+                fillcolor="rgba(63,107,75,0.12)",
+                hovertemplate="Semana %{x}<br>Fruta ingresada: %{y:,.0f} kg<extra></extra>",
             )
         )
+        add_reference_line(fig_fruta, sum(kg_vals) / len(kg_vals), "Promedio semanal")
+        peak_idx = best_index(kg_vals)
+        if peak_idx is not None:
+            add_peak_annotation(fig_fruta, semanas[peak_idx], kg_vals[peak_idx], f"Pico: {compact_number(kg_vals[peak_idx], ' kg')}")
+        add_metric_badge(fig_fruta, f"Semana pico: {compact_number(max(kg_vals), ' kg')}")
     else:
         fig_fruta = empty_figure()
 
-    fig_fruta.update_layout(**chart_layout(height=300))
-    fig_fruta.update_layout(yaxis_title="Kg")
+    fig_fruta.update_layout(**chart_layout(height=430, emphasis="hero", showlegend=False, unified_hover=True))
+    fig_fruta.update_layout(yaxis_title="Kg", xaxis=dict(tickangle=0, nticks=8))
 
     # --- Chart 2: Evolución ventas (bar) ---
     if evolucion_ventas:
@@ -329,14 +399,19 @@ def update_resumen(campaña, fecha_desde, fecha_hasta, finca, variedad):
                 x=sem_v,
                 y=imp_v,
                 name="Ventas USD",
-                marker_color="#4A9B6A",
+                marker_color="#6C8C5A",
+                hovertemplate="Semana %{x}<br>Ventas netas: USD %{y:,.0f}<extra></extra>",
             )
         )
+        peak_idx = best_index(imp_v)
+        if peak_idx is not None:
+            add_peak_annotation(fig_ventas, sem_v[peak_idx], imp_v[peak_idx], f"Mejor semana: USD {compact_number(imp_v[peak_idx])}")
+        add_metric_badge(fig_ventas, f"Facturación pico: USD {compact_number(max(imp_v))}")
     else:
         fig_ventas = empty_figure()
 
-    fig_ventas.update_layout(**chart_layout(height=300))
-    fig_ventas.update_layout(yaxis_title="USD")
+    fig_ventas.update_layout(**chart_layout(height=390, emphasis="secondary", showlegend=False, unified_hover=True))
+    fig_ventas.update_layout(yaxis_title="USD", xaxis=dict(tickangle=0, nticks=8))
 
     # --- Chart 3: Mix destino (donut) ---
     if mix_destino:
@@ -350,19 +425,15 @@ def update_resumen(campaña, fecha_desde, fecha_hasta, finca, variedad):
                 marker=dict(colors=CHART_COLORS),
                 textinfo="label+percent",
                 textfont=dict(size=11),
+                hovertemplate="%{label}<br>%{value:,.0f} kg<br>%{percent}<extra></extra>",
             )
         )
+        add_donut_center_label(fig_destino, dest_labels[0], "destino líder")
     else:
         fig_destino = empty_figure()
 
-    fig_destino.update_layout(
-        height=300,
-        margin=dict(l=10, r=10, t=30, b=10),
-        paper_bgcolor="#FFFFFF",
-        plot_bgcolor="#FFFFFF",
-        showlegend=False,
-        font=dict(family="Manrope, Segoe UI, sans-serif", size=12),
-    )
+    fig_destino.update_layout(**donut_layout(height=430))
+    fig_destino.update_layout(showlegend=True)
 
     # --- Chart 4: Margen bruto por mes (bar + line combo) ---
     if margen_por_mes:
@@ -375,7 +446,8 @@ def update_resumen(campaña, fecha_desde, fecha_hasta, finca, variedad):
                 x=meses,
                 y=ingresos,
                 name="Ingresos USD",
-                marker_color="#7EC8A0",
+                marker_color="#95B29E",
+                hovertemplate="Mes %{x}<br>Ingresos: USD %{y:,.0f}<extra></extra>",
             )
         )
         fig_margen.add_trace(
@@ -384,17 +456,22 @@ def update_resumen(campaña, fecha_desde, fecha_hasta, finca, variedad):
                 y=margen_usd,
                 name="Margen Bruto USD",
                 mode="lines+markers",
-                line=dict(color="#8B6914", width=2),
+                line=dict(color="#B69245", width=2.8),
+                marker=dict(size=7, color="#B69245"),
+                hovertemplate="Mes %{x}<br>Margen bruto: USD %{y:,.0f}<extra></extra>",
                 yaxis="y2",
             )
         )
         fig_margen.update_layout(
             yaxis2=dict(overlaying="y", side="right", showgrid=False, title="Margen USD")
         )
+        peak_idx = best_index(margen_usd)
+        if peak_idx is not None:
+            add_peak_annotation(fig_margen, meses[peak_idx], margen_usd[peak_idx], f"Mejor mes: USD {compact_number(margen_usd[peak_idx])}", color="#B69245")
     else:
         fig_margen = empty_figure()
 
-    fig_margen.update_layout(**chart_layout(height=300))
+    fig_margen.update_layout(**chart_layout(height=390, emphasis="secondary", showlegend=True, unified_hover=True))
 
     insights_comp = insights_panel("Insights automáticos", insights)
 

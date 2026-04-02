@@ -5,27 +5,37 @@ from dash import Input, Output, State, callback, dcc, html
 
 from frontend.components.empty_state import empty_state
 from frontend.components.drilldown import drilldown_chart_card
-from frontend.components.filter_bar import date_filter, dropdown_filter, render_filter_bar
+from frontend.components.filter_bar import bind_date_shortcuts, campaign_filter, date_range_filter, dropdown_filter, render_filter_bar
 from frontend.components.header import render_header
 from frontend.components.kpi_card import kpi_card
-from frontend.components.loading import loading_graph, loading_slot
+from frontend.components.loading import loading_slot
 from frontend.components.tables import render_table
 from frontend.utils import (
     CHART_COLORS,
+    add_donut_center_label,
+    add_metric_badge,
+    add_reference_line,
     api_get,
+    best_index,
     build_options,
     chart_layout,
+    compact_number,
     empty_figure,
     fetch_options,
     filter_params,
     fmt_num,
     fmt_usd,
     insights_panel,
+    page_empty_outputs,
+    page_failure_outputs,
     panel_filter_options,
+    safe_callback,
     sanitize_dropdown_value,
+    smart_bar_colors,
 )
 
 dash.register_page(__name__, path="/costos", name="Costos y Rentabilidad")
+bind_date_shortcuts("costos")
 
 
 layout = html.Div(
@@ -36,9 +46,8 @@ layout = html.Div(
             [
                 render_filter_bar(
                     [
-                        dropdown_filter("CAMPAÑA", "costos-campaña", fetch_options("campanas", "campanas"), width="110px"),
-                        date_filter("DESDE", "costos-fecha-desde", "2024-03-01"),
-                        date_filter("HASTA", "costos-fecha-hasta", "2024-11-30"),
+                        campaign_filter("costos-campaña", width="110px"),
+                        date_range_filter("costos", "2024-03-01", "2024-11-30"),
                         dropdown_filter("FINCA", "costos-finca", fetch_options("fincas", "fincas"), width="170px"),
                         dropdown_filter("LOTE", "costos-lote", fetch_options("lotes", "lotes"), width="130px"),
                         dropdown_filter("CENTRO", "costos-centro", fetch_options("centros_costo", "centros_costo"), width="160px"),
@@ -51,15 +60,24 @@ layout = html.Div(
                 dbc.Row(
                     [
                         dbc.Col(
-                            drilldown_chart_card("Composición del Costo", "costos-chart-composicion", "costos", "composicion_costo"),
-                            width=4,
+                            drilldown_chart_card(
+                                "Margen comercial por canal",
+                                "costos-chart-canal",
+                                "costos",
+                                "costo_por_canal",
+                                subtitle="Rentabilidad comercial estimada por canal con criterio consistente frente a cliente y destino",
+                                priority="primary",
+                            ),
+                            width=8,
                         ),
                         dbc.Col(
-                            drilldown_chart_card("Costo por Finca", "costos-chart-finca", "costos", "costo_por_finca"),
-                            width=4,
-                        ),
-                        dbc.Col(
-                            drilldown_chart_card("Costo por Canal", "costos-chart-canal", "costos", "costo_por_canal"),
+                            drilldown_chart_card(
+                                "Composición del costo",
+                                "costos-chart-composicion",
+                                "costos",
+                                "composicion_costo",
+                                subtitle="Participación de campo, empaque, logística y estructura sobre el total",
+                            ),
                             width=4,
                         ),
                     ],
@@ -68,12 +86,25 @@ layout = html.Div(
                 dbc.Row(
                     [
                         dbc.Col(
-                            drilldown_chart_card("Costo por Lote", "costos-chart-lote", "costos", "costo_por_lote"),
-                            width=6,
+                            drilldown_chart_card(
+                                "Costo unitario por lote",
+                                "costos-chart-lote",
+                                "costos",
+                                "costo_por_lote",
+                                subtitle="Lotes con mayor presión de costo por kilo exportable",
+                                priority="primary",
+                            ),
+                            width=7,
                         ),
                         dbc.Col(
-                            drilldown_chart_card("Margen por Cliente", "costos-chart-cliente", "costos", "margen_por_cliente"),
-                            width=6,
+                            drilldown_chart_card(
+                                "Costo por kg exportable por finca",
+                                "costos-chart-finca",
+                                "costos",
+                                "costo_por_finca",
+                                subtitle="Comparación entre fincas para detectar desvíos de eficiencia",
+                            ),
+                            width=5,
                         ),
                     ],
                     className="g-3",
@@ -81,9 +112,25 @@ layout = html.Div(
                 dbc.Row(
                     [
                         dbc.Col(
-                            drilldown_chart_card("Margen por Destino", "costos-chart-destino", "costos", "margen_por_destino"),
-                            width=12,
-                        )
+                            drilldown_chart_card(
+                                "Margen comercial por cliente",
+                                "costos-chart-cliente",
+                                "costos",
+                                "margen_por_cliente",
+                                subtitle="Clientes que capturan o erosionan el margen comercial estimado",
+                            ),
+                            width=6,
+                        ),
+                        dbc.Col(
+                            drilldown_chart_card(
+                                "Margen comercial por destino final",
+                                "costos-chart-destino",
+                                "costos",
+                                "margen_por_destino",
+                                subtitle="Comparación ejecutiva entre exportación, mercado interno e industria con una base de margen homogénea",
+                            ),
+                            width=6,
+                        ),
                     ],
                     className="g-3",
                 ),
@@ -103,6 +150,7 @@ layout = html.Div(
 
 
 @callback(
+    Output("costos-campaña", "options"),
     Output("costos-finca", "options"),
     Output("costos-lote", "options"),
     Output("costos-centro", "options"),
@@ -111,25 +159,16 @@ layout = html.Div(
     Input("costos-campaña", "value"),
     Input("costos-fecha-desde", "date"),
     Input("costos-fecha-hasta", "date"),
-    Input("costos-finca", "value"),
-    Input("costos-lote", "value"),
-    Input("costos-centro", "value"),
-    Input("costos-tipo", "value"),
-    Input("costos-canal", "value"),
 )
-def update_costos_filter_options(campaña, fecha_desde, fecha_hasta, finca, lote, centro_costo, tipo_costo, canal):
+def update_costos_filter_options(campaña, fecha_desde, fecha_hasta):
     options = panel_filter_options(
         "costos",
         campaña=campaña,
         fecha_desde=fecha_desde,
         fecha_hasta=fecha_hasta,
-        finca=finca,
-        lote=lote,
-        centro_costo=centro_costo,
-        tipo_costo=tipo_costo,
-        canal=canal,
     )
     return (
+        build_options(options.get("campaña", []), all_label="Todas"),
         build_options(options.get("finca", []), all_label="Todas"),
         build_options(options.get("lote", []), all_label="Todos"),
         build_options(options.get("centro_costo", []), all_label="Todos"),
@@ -209,6 +248,15 @@ def sync_costos_filter_values(finca_options, lote_options, centro_options, tipo_
     Input("costos-tipo", "value"),
     Input("costos-canal", "value"),
 )
+@safe_callback(
+    lambda: page_failure_outputs(
+        "Costos y Rentabilidad",
+        kpi_blocks=2,
+        chart_heights=[430, 360, 440, 420, 360, 340],
+        insights_title="Insights de costos y rentabilidad",
+    ),
+    "costos",
+)
 def update_costos(campaña, fecha_desde, fecha_hasta, finca, lote, centro_costo, tipo_costo, canal):
     data = api_get(
         "/api/costos",
@@ -223,6 +271,15 @@ def update_costos(campaña, fecha_desde, fecha_hasta, finca, lote, centro_costo,
             canal=canal,
         ),
     )
+    request_error = data.get("_request_error")
+    if request_error:
+        return page_failure_outputs(
+            "Costos y Rentabilidad",
+            kpi_blocks=2,
+            chart_heights=[430, 360, 440, 420, 360, 340],
+            insights_title="Insights de costos y rentabilidad",
+            message=request_error,
+        )
 
     kpis = data.get("kpis", {})
     composicion = data.get("composicion_costo", [])
@@ -233,6 +290,30 @@ def update_costos(campaña, fecha_desde, fecha_hasta, finca, lote, centro_costo,
     margen_por_destino = data.get("margen_por_destino", [])
     tabla = data.get("tabla", [])
     insights = data.get("insights", [])
+
+    if not any([composicion, costo_por_finca, costo_por_lote, costo_por_canal, margen_por_cliente, margen_por_destino, tabla]):
+        return page_empty_outputs(
+            "Costos y Rentabilidad",
+            path="/costos",
+            kpi_blocks=2,
+            chart_heights=[430, 360, 440, 420, 360, 340],
+            insights_title="Insights de costos y rentabilidad",
+            campaña=campaña,
+        )
+
+    mejor_lote_item = min(costo_por_lote, key=lambda item: item.get("costo_kg", float("inf"))) if costo_por_lote else None
+    promedio_lote = sum(item.get("costo_kg", 0) for item in costo_por_lote) / len(costo_por_lote) if costo_por_lote else 0
+    mejora_lote_pct = ((promedio_lote - mejor_lote_item.get("costo_kg", 0)) / promedio_lote * 100) if mejor_lote_item and promedio_lote else 0
+    texto_mejora_lote = (
+        f"{mejora_lote_pct:.1f}% debajo del promedio"
+        if mejora_lote_pct >= 0
+        else f"{abs(mejora_lote_pct):.1f}% por encima del promedio"
+    ) if mejor_lote_item else ""
+
+    mejor_canal_item = max(costo_por_canal, key=lambda item: item.get("margen_pct", float("-inf"))) if costo_por_canal else None
+    promedio_canal = sum(item.get("margen_pct", 0) for item in costo_por_canal) / len(costo_por_canal) if costo_por_canal else 0
+    mejora_canal_pp = (mejor_canal_item.get("margen_pct", 0) - promedio_canal) if mejor_canal_item else 0
+    texto_mejora_canal = f"{mejora_canal_pp:+.1f} pp vs promedio" if mejor_canal_item else ""
 
     row_1 = dbc.Row(
         [
@@ -248,102 +329,251 @@ def update_costos(campaña, fecha_desde, fecha_hasta, finca, lote, centro_costo,
         [
             dbc.Col(kpi_card("Margen Bruto", fmt_usd(kpis.get("margen_bruto_usd", 0)), accent="primary", drill_panel="costos", drill_item="margen_bruto_usd"), width=3),
             dbc.Col(kpi_card("Margen Bruto %", fmt_num(kpis.get("margen_bruto_pct", 0), 1), "%", accent="green", drill_panel="costos", drill_item="margen_bruto_pct"), width=3),
-            dbc.Col(kpi_card("Mejor Lote", kpis.get("mejor_lote", "-"), accent="amber", drill_panel="costos", drill_item="mejor_lote"), width=3),
-            dbc.Col(kpi_card("Mejor Canal", kpis.get("mejor_canal", "-"), accent="blue", drill_panel="costos", drill_item="mejor_canal"), width=3),
+            dbc.Col(
+                kpi_card(
+                    "Lote más eficiente",
+                    mejor_lote_item.get("lote", "-") if mejor_lote_item else "-",
+                    accent="amber",
+                    subtitle=(
+                        f"ARS {mejor_lote_item.get('costo_kg', 0):,.1f}/kg en {mejor_lote_item.get('finca', '-')}"
+                        if mejor_lote_item
+                        else ""
+                    ),
+                    delta=texto_mejora_lote,
+                    delta_type="positive" if mejora_lote_pct >= 0 else "negative",
+                    drill_panel="costos",
+                    drill_item="mejor_lote",
+                ),
+                width=3,
+            ),
+            dbc.Col(
+                kpi_card(
+                    "Canal más rentable",
+                    mejor_canal_item.get("canal", "-") if mejor_canal_item else "-",
+                    accent="blue",
+                    subtitle=(
+                        f"Margen {mejor_canal_item.get('margen_pct', 0):,.1f}%"
+                        if mejor_canal_item
+                        else ""
+                    ),
+                    delta=texto_mejora_canal,
+                    delta_type="positive" if mejora_canal_pp >= 0 else "negative",
+                    drill_panel="costos",
+                    drill_item="mejor_canal",
+                ),
+                width=3,
+            ),
         ],
         className="g-3",
     )
 
     if composicion:
+        labels = [item["tipo"] for item in composicion]
+        values = [item["importe"] for item in composicion]
+        top_cc_idx = best_index(values) or 0
+        composition_colors = [
+            CHART_COLORS[0] if label == "Empaque" else
+            CHART_COLORS[1] if label == "Campo" else
+            CHART_COLORS[2] if label == "Logística" else
+            CHART_COLORS[5] if label == "Administración" else
+            "rgba(120, 133, 106, 0.55)"
+            for label in labels
+        ]
         fig_composicion = go.Figure(
             go.Pie(
-                labels=[item["tipo"] for item in composicion],
-                values=[item["importe"] for item in composicion],
-                hole=0.52,
-                marker=dict(colors=CHART_COLORS[: len(composicion)]),
-                textinfo="label+percent",
+                labels=labels,
+                values=values,
+                hole=0.68,
+                marker=dict(colors=composition_colors, line=dict(color="rgba(255,252,247,0.9)", width=2)),
+                textinfo="none",
+                sort=False,
+                hovertemplate="<b>%{label}</b><br>Importe: ARS %{value:,.0f}<br>Participación: %{percent}<extra></extra>",
             )
         )
-        fig_composicion.update_layout(height=310, margin=dict(l=10, r=10, t=15, b=10), paper_bgcolor="#FFFCF7")
+        add_donut_center_label(
+            fig_composicion,
+            f"ARS {fmt_num(kpis.get('costo_total_kg_exportado', 0), 1)}",
+            "costo total / kg",
+        )
+        add_metric_badge(
+            fig_composicion,
+            f"{labels[top_cc_idx]} explica {composicion[top_cc_idx]['pct']:.1f}% del costo total",
+            tone="warning",
+        )
+        composicion_layout = chart_layout(height=430, showlegend=True)
+        composicion_layout["margin"] = dict(l=8, r=8, t=16, b=8)
+        fig_composicion.update_layout(
+            **composicion_layout,
+            legend=dict(orientation="v", x=1.0, y=0.5, yanchor="middle", font=dict(size=11)),
+        )
     else:
-        fig_composicion = empty_figure()
+        fig_composicion = empty_figure(height=430)
 
     if costo_por_finca:
+        finca_sorted = sorted(costo_por_finca, key=lambda item: item.get("costo_kg", 0), reverse=True)
+        fincas = [item["finca"] for item in finca_sorted]
+        costos_finca = [item["costo_kg"] for item in finca_sorted]
+        highest_finca_idx = best_index(costos_finca) or 0
         fig_finca = go.Figure(
             go.Bar(
-                x=[item["finca"] for item in costo_por_finca],
-                y=[item["costo_kg"] for item in costo_por_finca],
-                marker_color="#6C8C5A",
-                text=[fmt_num(item["costo_kg"], 1) for item in costo_por_finca],
+                y=fincas,
+                x=costos_finca,
+                orientation="h",
+                marker_color=[CHART_COLORS[0] if idx == highest_finca_idx else CHART_COLORS[5] for idx, _ in enumerate(fincas)],
+                text=[f"ARS {value:,.1f}" for value in costos_finca],
                 textposition="outside",
+                hovertemplate="<b>%{y}</b><br>Costo unitario: ARS %{x:,.1f}/kg<extra></extra>",
             )
         )
+        fig_finca.add_vline(
+            x=sum(costos_finca) / len(costos_finca),
+            line_color=CHART_COLORS[5],
+            line_dash="dot",
+            annotation_text="promedio",
+            annotation_position="top",
+        )
+        add_metric_badge(fig_finca, f"{fincas[highest_finca_idx]} tiene el mayor costo por kg", tone="warning")
     else:
-        fig_finca = empty_figure()
-    fig_finca.update_layout(**chart_layout(height=310))
-    fig_finca.update_layout(showlegend=False, yaxis_title="ARS/kg")
+        fig_finca = empty_figure(height=360)
+    fig_finca.update_layout(**chart_layout(height=360, showlegend=False))
+    fig_finca.update_layout(
+        showlegend=False,
+        xaxis_title="ARS/kg",
+        margin=dict(l=170, r=22, t=24, b=32),
+        yaxis=dict(showgrid=False, showline=False),
+    )
 
     if costo_por_canal:
+        canales_sorted = sorted(costo_por_canal, key=lambda item: item["margen_pct"], reverse=True)
+        canales = [item["canal"] for item in canales_sorted]
+        margenes = [item["margen_pct"] for item in canales_sorted]
+        ingresos = [item["ingreso_usd"] for item in canales_sorted]
+        best_canal_idx = best_index(margenes) or 0
+        canales_negativos = sum(1 for value in margenes if value < 0)
         fig_canal = go.Figure(
             go.Bar(
-                x=[item["canal"] for item in costo_por_canal],
-                y=[item["margen_pct"] for item in costo_por_canal],
-                marker_color=["#4D755A" if item["margen_pct"] >= 15 else "#C26A45" for item in costo_por_canal],
-                text=[f"{item['margen_pct']:.1f}%" for item in costo_por_canal],
+                y=canales,
+                x=margenes,
+                orientation="h",
+                customdata=ingresos,
+                marker_color=[
+                    CHART_COLORS[0] if value >= 0 and idx == best_canal_idx else
+                    CHART_COLORS[1] if value >= 0 else
+                    CHART_COLORS[4]
+                    for idx, value in enumerate(margenes)
+                ],
+                text=[f"{value:.1f}%" for value in margenes],
                 textposition="outside",
+                hovertemplate="<b>%{y}</b><br>Margen: %{x:.1f}%<br>Ingreso: USD %{customdata:,.0f}<extra></extra>",
             )
         )
+        fig_canal.add_vline(
+            x=0,
+            line_color=CHART_COLORS[5],
+            line_dash="solid",
+            annotation_text="punto de equilibrio",
+            annotation_position="top",
+        )
+        add_metric_badge(
+            fig_canal,
+            (
+                f"{canales[best_canal_idx]} lidera con {margenes[best_canal_idx]:.1f}%; {canales_negativos} canal(es) siguen en negativo"
+                if canales_negativos
+                else f"{canales[best_canal_idx]} es el canal más rentable"
+            ),
+            tone="primary" if not canales_negativos else "warning",
+        )
     else:
-        fig_canal = empty_figure()
-    fig_canal.update_layout(**chart_layout(height=310))
-    fig_canal.update_layout(showlegend=False, yaxis_title="%")
+        fig_canal = empty_figure(height=440)
+    fig_canal.update_layout(**chart_layout(height=440, emphasis="hero", showlegend=False))
+    fig_canal.update_layout(
+        showlegend=False,
+        xaxis_title="Margen %",
+        margin=dict(l=210, r=32, t=26, b=34),
+        yaxis=dict(showgrid=False, showline=False),
+    )
 
     if costo_por_lote:
-        top = costo_por_lote[:12]
+        top = sorted(costo_por_lote, key=lambda item: item.get("costo_kg", 0), reverse=True)[:12]
+        lotes_top = [f"{item['lote']} ({item['finca']})" for item in top]
+        costo_unit = [item["costo_kg"] for item in top]
+        worst_lote_idx = best_index(costo_unit) or 0
         fig_lote = go.Figure(
             go.Bar(
-                y=[f"{item['lote']} ({item['finca']})" for item in top],
-                x=[item["costo_kg"] for item in top],
+                y=lotes_top,
+                x=costo_unit,
                 orientation="h",
-                marker_color="#B69245",
-                text=[fmt_num(item["costo_kg"], 1) for item in top],
+                marker_color=[CHART_COLORS[0] if idx == worst_lote_idx else CHART_COLORS[5] for idx, _ in enumerate(lotes_top)],
+                text=[f"ARS {value:,.1f}" for value in costo_unit],
                 textposition="outside",
+                hovertemplate="<b>%{y}</b><br>Costo unitario: ARS %{x:,.1f}/kg<extra></extra>",
             )
         )
+        fig_lote.add_vline(
+            x=sum(costo_unit) / len(costo_unit),
+            line_color=CHART_COLORS[2],
+            line_dash="dot",
+            annotation_text="promedio",
+            annotation_position="top",
+        )
+        sobre_promedio_lote = ((costo_unit[worst_lote_idx] - (sum(costo_unit) / len(costo_unit))) / (sum(costo_unit) / len(costo_unit)) * 100) if costo_unit else 0
+        add_metric_badge(
+            fig_lote,
+            f"{top[worst_lote_idx]['lote']} está {sobre_promedio_lote:.1f}% por encima del promedio",
+            tone="warning",
+        )
     else:
-        fig_lote = empty_figure()
-    fig_lote.update_layout(**chart_layout(height=330))
-    fig_lote.update_layout(showlegend=False, margin=dict(l=170, r=25, t=25, b=30), xaxis_title="ARS/kg")
+        fig_lote = empty_figure(height=420)
+    fig_lote.update_layout(**chart_layout(height=420, emphasis="hero", showlegend=False))
+    fig_lote.update_layout(
+        showlegend=False,
+        margin=dict(l=182, r=25, t=26, b=34),
+        xaxis_title="ARS/kg",
+        yaxis=dict(showgrid=False, showline=False),
+    )
 
     if margen_por_cliente:
         top_clientes = margen_por_cliente[:10]
+        clientes = [item["cliente"] for item in top_clientes]
+        margenes_cliente = [item["margen_pct"] for item in top_clientes]
+        ingresos_cliente = [item["ingreso_usd"] for item in top_clientes]
+        best_cliente_idx = best_index(margenes_cliente) or 0
         fig_cliente = go.Figure(
             go.Bar(
-                x=[item["cliente"] for item in top_clientes],
-                y=[item["margen_pct"] for item in top_clientes],
-                marker_color="#95B29E",
-                text=[f"{item['margen_pct']:.1f}%" for item in top_clientes],
+                x=clientes,
+                y=margenes_cliente,
+                customdata=ingresos_cliente,
+                marker_color=smart_bar_colors(margenes_cliente, highlight=best_cliente_idx),
+                text=[f"{value:.1f}%" for value in margenes_cliente],
                 textposition="outside",
+                hovertemplate="<b>%{x}</b><br>Margen: %{y:.1f}%<br>Ingreso: USD %{customdata:,.0f}<extra></extra>",
             )
         )
+        add_reference_line(fig_cliente, sum(margenes_cliente) / len(margenes_cliente), "promedio")
+        add_metric_badge(fig_cliente, f"{clientes[best_cliente_idx]} es el cliente más rentable", tone="primary")
     else:
-        fig_cliente = empty_figure()
-    fig_cliente.update_layout(**chart_layout(height=330))
+        fig_cliente = empty_figure(height=360)
+    fig_cliente.update_layout(**chart_layout(height=360, showlegend=False))
     fig_cliente.update_layout(showlegend=False, yaxis_title="%")
 
     if margen_por_destino:
+        destinos = [item["destino"] for item in margen_por_destino]
+        margenes_destino = [item["margen_pct"] for item in margen_por_destino]
+        best_destino_idx = best_index(margenes_destino) or 0
         fig_destino = go.Figure(
             go.Bar(
-                x=[item["destino"] for item in margen_por_destino],
-                y=[item["margen_pct"] for item in margen_por_destino],
-                marker_color=CHART_COLORS[: len(margen_por_destino)],
-                text=[f"{item['margen_pct']:.1f}%" for item in margen_por_destino],
+                x=destinos,
+                y=margenes_destino,
+                marker_color=smart_bar_colors(margenes_destino, highlight=best_destino_idx),
+                text=[f"{value:.1f}%" for value in margenes_destino],
                 textposition="outside",
+                hovertemplate="<b>%{x}</b><br>Margen: %{y:.1f}%<extra></extra>",
             )
         )
+        add_metric_badge(fig_destino, f"{destinos[best_destino_idx]} captura el mejor margen del mix", tone="primary")
     else:
-        fig_destino = empty_figure()
-    fig_destino.update_layout(**chart_layout(height=300))
+        fig_destino = empty_figure(height=340)
+    fig_destino.update_layout(**chart_layout(height=340, showlegend=False))
     fig_destino.update_layout(showlegend=False, yaxis_title="%")
 
     if tabla:

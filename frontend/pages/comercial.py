@@ -5,27 +5,39 @@ from dash import Input, Output, State, callback, dcc, html
 
 from frontend.components.empty_state import empty_state
 from frontend.components.drilldown import drilldown_chart_card
-from frontend.components.filter_bar import date_filter, dropdown_filter, render_filter_bar
+from frontend.components.filter_bar import bind_date_shortcuts, campaign_filter, date_range_filter, dropdown_filter, render_filter_bar
 from frontend.components.header import render_header
 from frontend.components.kpi_card import kpi_card
-from frontend.components.loading import loading_graph, loading_slot
+from frontend.components.loading import loading_slot
 from frontend.components.tables import render_table
 from frontend.utils import (
     CHART_COLORS,
+    add_donut_center_label,
+    add_metric_badge,
+    add_peak_annotation,
+    add_reference_line,
     api_get,
+    best_index,
     build_options,
     chart_layout,
+    compact_number,
     empty_figure,
     fetch_options,
     filter_params,
+    format_month_label,
     fmt_num,
     fmt_usd,
     insights_panel,
+    page_empty_outputs,
+    page_failure_outputs,
     panel_filter_options,
+    safe_callback,
     sanitize_dropdown_value,
+    smart_bar_colors,
 )
 
 dash.register_page(__name__, path="/comercial", name="Comercial")
+bind_date_shortcuts("comercial")
 
 
 layout = html.Div(
@@ -36,9 +48,8 @@ layout = html.Div(
             [
                 render_filter_bar(
                     [
-                        dropdown_filter("CAMPAÑA", "comercial-campaña", fetch_options("campanas", "campanas"), width="110px"),
-                        date_filter("DESDE", "comercial-fecha-desde", "2024-03-01"),
-                        date_filter("HASTA", "comercial-fecha-hasta", "2024-11-30"),
+                        campaign_filter("comercial-campaña", width="110px"),
+                        date_range_filter("comercial", "2024-03-01", "2024-11-30"),
                         dropdown_filter("CLIENTE", "comercial-cliente", fetch_options("clientes", "clientes"), width="190px"),
                         dropdown_filter("DESTINO", "comercial-destino", fetch_options("destinos", "destinos"), width="160px"),
                         dropdown_filter("CANAL", "comercial-canal", fetch_options("canales", "canales"), width="190px"),
@@ -50,11 +61,24 @@ layout = html.Div(
                 dbc.Row(
                     [
                         dbc.Col(
-                            drilldown_chart_card("Ventas por Cliente", "comercial-chart-clientes", "comercial", "ventas_por_cliente"),
+                            drilldown_chart_card(
+                                "Top clientes por facturación",
+                                "comercial-chart-clientes",
+                                "comercial",
+                                "ventas_por_cliente",
+                                subtitle="Clientes que concentran el valor vendido en el período filtrado",
+                                priority="primary",
+                            ),
                             width=7,
                         ),
                         dbc.Col(
-                            drilldown_chart_card("Mix por Destino", "comercial-chart-destino", "comercial", "ventas_por_destino"),
+                            drilldown_chart_card(
+                                "Mix de ingresos por destino",
+                                "comercial-chart-destino",
+                                "comercial",
+                                "ventas_por_destino",
+                                subtitle="Participación relativa entre exportación, interno e industria",
+                            ),
                             width=5,
                         ),
                     ],
@@ -63,15 +87,33 @@ layout = html.Div(
                 dbc.Row(
                     [
                         dbc.Col(
-                            drilldown_chart_card("Precio Promedio por Calibre", "comercial-chart-calibre", "comercial", "precio_por_calibre"),
+                            drilldown_chart_card(
+                                "Precio promedio por calibre",
+                                "comercial-chart-calibre",
+                                "comercial",
+                                "precio_por_calibre",
+                                subtitle="Escalera de precios para entender prima comercial por tamaño",
+                            ),
                             width=4,
                         ),
                         dbc.Col(
-                            drilldown_chart_card("Margen por Canal", "comercial-chart-canal", "comercial", "margen_por_canal"),
+                            drilldown_chart_card(
+                                "Margen por canal",
+                                "comercial-chart-canal",
+                                "comercial",
+                                "margen_por_canal",
+                                subtitle="Comparación de rentabilidad para decidir foco comercial",
+                            ),
                             width=4,
                         ),
                         dbc.Col(
-                            drilldown_chart_card("Top Clientes", "comercial-chart-top", "comercial", "top_clientes"),
+                            drilldown_chart_card(
+                                "Top clientes: valor vs margen",
+                                "comercial-chart-top",
+                                "comercial",
+                                "top_clientes",
+                                subtitle="Cruce de facturación y margen para detectar cuentas premium",
+                            ),
                             width=4,
                         ),
                     ],
@@ -80,7 +122,14 @@ layout = html.Div(
                 dbc.Row(
                     [
                         dbc.Col(
-                            drilldown_chart_card("Evolución de Ventas", "comercial-chart-evolucion", "comercial", "evolucion_ventas"),
+                            drilldown_chart_card(
+                                "Evolución mensual de ventas",
+                                "comercial-chart-evolucion",
+                                "comercial",
+                                "evolucion_ventas",
+                                subtitle="Facturación y kilos vendidos para leer ritmo comercial de la campaña",
+                                priority="primary",
+                            ),
                             width=12,
                         )
                     ],
@@ -102,6 +151,7 @@ layout = html.Div(
 
 
 @callback(
+    Output("comercial-campaña", "options"),
     Output("comercial-cliente", "options"),
     Output("comercial-destino", "options"),
     Output("comercial-canal", "options"),
@@ -109,23 +159,16 @@ layout = html.Div(
     Input("comercial-campaña", "value"),
     Input("comercial-fecha-desde", "date"),
     Input("comercial-fecha-hasta", "date"),
-    Input("comercial-cliente", "value"),
-    Input("comercial-destino", "value"),
-    Input("comercial-canal", "value"),
-    Input("comercial-moneda", "value"),
 )
-def update_comercial_filter_options(campaña, fecha_desde, fecha_hasta, cliente, destino, canal, moneda):
+def update_comercial_filter_options(campaña, fecha_desde, fecha_hasta):
     options = panel_filter_options(
         "comercial",
         campaña=campaña,
         fecha_desde=fecha_desde,
         fecha_hasta=fecha_hasta,
-        cliente=cliente,
-        destino=destino,
-        canal=canal,
-        moneda=moneda,
     )
     return (
+        build_options(options.get("campaña", []), all_label="Todas"),
         build_options(options.get("cliente", []), all_label="Todos"),
         build_options(options.get("destino", []), all_label="Todos"),
         build_options(options.get("canal", []), all_label="Todos"),
@@ -197,6 +240,15 @@ def sync_comercial_filter_values(cliente_options, destino_options, canal_options
     Input("comercial-canal", "value"),
     Input("comercial-moneda", "value"),
 )
+@safe_callback(
+    lambda: page_failure_outputs(
+        "Comercial",
+        kpi_blocks=2,
+        chart_heights=[430, 430, 340, 340, 340, 420],
+        insights_title="Insights comerciales",
+    ),
+    "comercial",
+)
 def update_comercial(campaña, fecha_desde, fecha_hasta, cliente, destino, canal, moneda):
     data = api_get(
         "/api/comercial",
@@ -210,6 +262,15 @@ def update_comercial(campaña, fecha_desde, fecha_hasta, cliente, destino, canal
             moneda=moneda,
         ),
     )
+    request_error = data.get("_request_error")
+    if request_error:
+        return page_failure_outputs(
+            "Comercial",
+            kpi_blocks=2,
+            chart_heights=[430, 430, 340, 340, 340, 420],
+            insights_title="Insights comerciales",
+            message=request_error,
+        )
 
     kpis = data.get("kpis", {})
     ventas_por_cliente = data.get("ventas_por_cliente", [])
@@ -220,6 +281,16 @@ def update_comercial(campaña, fecha_desde, fecha_hasta, cliente, destino, canal
     margen_por_canal = data.get("margen_por_canal", [])
     tabla = data.get("tabla", [])
     insights = data.get("insights", [])
+
+    if not any([ventas_por_cliente, ventas_por_destino, precio_por_calibre, evolucion, top_clientes, margen_por_canal, tabla]):
+        return page_empty_outputs(
+            "Comercial",
+            path="/comercial",
+            kpi_blocks=2,
+            chart_heights=[430, 430, 340, 340, 340, 420],
+            insights_title="Insights comerciales",
+            campaña=campaña,
+        )
 
     row_1 = dbc.Row(
         [
@@ -243,109 +314,202 @@ def update_comercial(campaña, fecha_desde, fecha_hasta, cliente, destino, canal
 
     if ventas_por_cliente:
         top = ventas_por_cliente[:10]
+        clientes = [item["cliente"] for item in top]
+        importes = [item["importe_usd"] for item in top]
+        kilos = [item["kg"] for item in top]
+        leader_idx = best_index(importes) or 0
         fig_clientes = go.Figure(
             go.Bar(
-                y=[item["cliente"] for item in top],
-                x=[item["importe_usd"] for item in top],
+                y=clientes,
+                x=importes,
                 orientation="h",
-                marker_color="#4D755A",
-                text=[fmt_usd(item["importe_usd"]) for item in top],
+                customdata=kilos,
+                marker_color=smart_bar_colors(importes, highlight=leader_idx),
+                text=[fmt_usd(value) for value in importes],
                 textposition="outside",
+                hovertemplate="<b>%{y}</b><br>Ventas: USD %{x:,.0f}<br>Kg vendidos: %{customdata:,.0f}<extra></extra>",
             )
         )
+        fig_clientes.add_vline(
+            x=sum(importes) / len(importes),
+            line_color=CHART_COLORS[2],
+            line_dash="dot",
+            annotation_text="promedio top clientes",
+            annotation_position="top",
+        )
+        add_metric_badge(
+            fig_clientes,
+            f"{clientes[leader_idx]} lidera con {fmt_usd(importes[leader_idx])}",
+            tone="primary",
+        )
     else:
-        fig_clientes = empty_figure()
-    fig_clientes.update_layout(**chart_layout(height=330))
-    fig_clientes.update_layout(margin=dict(l=180, r=30, t=30, b=30), showlegend=False, xaxis_title="USD")
+        fig_clientes = empty_figure(height=430)
+    fig_clientes.update_layout(**chart_layout(height=430, emphasis="hero", showlegend=False))
+    fig_clientes.update_layout(
+        margin=dict(l=190, r=30, t=28, b=34),
+        showlegend=False,
+        xaxis_title="USD",
+        yaxis=dict(showgrid=False, showline=False),
+    )
 
     if ventas_por_destino:
+        dest_labels = [item["destino"] for item in ventas_por_destino]
+        dest_values = [item["importe_usd"] for item in ventas_por_destino]
         fig_destino = go.Figure(
             go.Pie(
-                labels=[item["destino"] for item in ventas_por_destino],
-                values=[item["importe_usd"] for item in ventas_por_destino],
+                labels=dest_labels,
+                values=dest_values,
                 hole=0.55,
                 marker=dict(colors=CHART_COLORS[: len(ventas_por_destino)]),
-                textinfo="label+percent",
+                textinfo="percent",
+                hovertemplate="<b>%{label}</b><br>Ventas: USD %{value:,.0f}<br>Participación: %{percent}<extra></extra>",
             )
         )
-        fig_destino.update_layout(height=330, margin=dict(l=10, r=10, t=20, b=10), paper_bgcolor="#FFFCF7")
+        add_donut_center_label(fig_destino, dest_labels[0], "destino líder")
+        destino_layout = chart_layout(height=430, showlegend=True)
+        destino_layout["margin"] = dict(l=10, r=10, t=10, b=10)
+        fig_destino.update_layout(
+            **destino_layout,
+            legend=dict(orientation="v", x=1.02, y=0.5, yanchor="middle"),
+        )
     else:
-        fig_destino = empty_figure()
+        fig_destino = empty_figure(height=430)
 
     if precio_por_calibre:
+        calibres = [item["calibre"] for item in precio_por_calibre]
+        precios = [item["precio_promedio_usd"] for item in precio_por_calibre]
+        best_calibre_idx = best_index(precios) or 0
         fig_calibre = go.Figure(
-            go.Bar(
-                x=[item["calibre"] for item in precio_por_calibre],
-                y=[item["precio_promedio_usd"] for item in precio_por_calibre],
-                marker_color="#B69245",
-                text=[fmt_num(item["precio_promedio_usd"], 3) for item in precio_por_calibre],
-                textposition="outside",
+            go.Scatter(
+                x=calibres,
+                y=precios,
+                mode="lines+markers",
+                marker=dict(size=9, color=CHART_COLORS[2]),
+                line=dict(color=CHART_COLORS[2], width=2.6),
+                fill="tozeroy",
+                fillcolor="rgba(182,146,69,0.10)",
+                hovertemplate="<b>Calibre %{x}</b><br>Precio promedio: USD %{y:.3f}/kg<extra></extra>",
             )
         )
+        add_peak_annotation(
+            fig_calibre,
+            calibres[best_calibre_idx],
+            precios[best_calibre_idx],
+            f"Prima máxima USD {precios[best_calibre_idx]:.3f}/kg",
+        )
+        add_metric_badge(fig_calibre, f"Calibre {calibres[best_calibre_idx]} concentra el mayor precio", tone="warning")
     else:
-        fig_calibre = empty_figure()
-    fig_calibre.update_layout(**chart_layout(height=290))
+        fig_calibre = empty_figure(height=340)
+    fig_calibre.update_layout(**chart_layout(height=340, showlegend=False, unified_hover=True))
     fig_calibre.update_layout(showlegend=False, yaxis_title="USD/kg")
 
     if margen_por_canal:
+        canales_sorted = sorted(margen_por_canal, key=lambda item: item["margen_pct"], reverse=True)
+        canales = [item["canal"] for item in canales_sorted]
+        margenes = [item["margen_pct"] for item in canales_sorted]
+        importes_canal = [item["importe_usd"] for item in canales_sorted]
+        best_canal_idx = best_index(margenes) or 0
+        worst_canal_idx = best_index(margenes, reverse=True) or 0
         fig_canal = go.Figure(
             go.Bar(
-                x=[item["canal"] for item in margen_por_canal],
-                y=[item["margen_pct"] for item in margen_por_canal],
-                marker_color=["#4D755A" if item["margen_pct"] >= 20 else "#B69245" for item in margen_por_canal],
-                text=[f"{item['margen_pct']:.1f}%" for item in margen_por_canal],
+                y=canales,
+                x=margenes,
+                orientation="h",
+                customdata=importes_canal,
+                marker_color=smart_bar_colors(margenes, highlight=best_canal_idx),
+                text=[f"{value:.1f}%" for value in margenes],
                 textposition="outside",
+                hovertemplate="<b>%{y}</b><br>Margen: %{x:.1f}%<br>Ventas: USD %{customdata:,.0f}<extra></extra>",
             )
         )
+        fig_canal.add_vline(
+            x=sum(margenes) / len(margenes),
+            line_color=CHART_COLORS[2],
+            line_dash="dot",
+            annotation_text="promedio",
+            annotation_position="top",
+        )
+        add_metric_badge(fig_canal, f"Menor margen en {canales[worst_canal_idx]}", tone="warning")
     else:
-        fig_canal = empty_figure()
-    fig_canal.update_layout(**chart_layout(height=290))
-    fig_canal.update_layout(showlegend=False, yaxis_title="%")
+        fig_canal = empty_figure(height=340)
+    fig_canal.update_layout(**chart_layout(height=340, showlegend=False))
+    fig_canal.update_layout(
+        showlegend=False,
+        xaxis_title="Margen %",
+        margin=dict(l=190, r=26, t=24, b=34),
+        yaxis=dict(showgrid=False, showline=False),
+    )
 
     if top_clientes:
+        clientes_top = [item["cliente"] for item in top_clientes]
+        ventas_top = [item["importe_usd"] for item in top_clientes]
+        margen_top = [item["margen_pct"] for item in top_clientes]
+        standout_idx = best_index(margen_top) or 0
         fig_top = go.Figure(
             go.Scatter(
-                x=[item["importe_usd"] for item in top_clientes],
-                y=[item["margen_pct"] for item in top_clientes],
+                x=ventas_top,
+                y=margen_top,
                 mode="markers+text",
-                text=[item["cliente"] for item in top_clientes],
+                text=[name if idx < 4 else "" for idx, name in enumerate(clientes_top)],
                 textposition="top center",
                 marker=dict(
-                    size=[max(10, min(28, item["importe_usd"] / 18_000)) for item in top_clientes],
-                    color="#6C8C5A",
-                    opacity=0.85,
+                    size=[max(14, min(34, value / 22_000)) for value in ventas_top],
+                    color=[CHART_COLORS[0] if idx == standout_idx else CHART_COLORS[3] for idx, _ in enumerate(clientes_top)],
+                    opacity=0.88,
+                    line=dict(width=1, color="rgba(36,49,38,0.12)"),
                 ),
+                customdata=clientes_top,
+                hovertemplate="<b>%{customdata}</b><br>Ventas: USD %{x:,.0f}<br>Margen: %{y:.1f}%<extra></extra>",
             )
         )
+        avg_x = sum(ventas_top) / len(ventas_top)
+        avg_y = sum(margen_top) / len(margen_top)
+        fig_top.add_vline(x=avg_x, line_color="rgba(108,140,90,0.35)", line_dash="dot")
+        fig_top.add_hline(y=avg_y, line_color="rgba(108,140,90,0.35)", line_dash="dot")
+        add_metric_badge(fig_top, f"{clientes_top[standout_idx]} es la cuenta más rentable", tone="primary")
     else:
-        fig_top = empty_figure()
-    fig_top.update_layout(**chart_layout(height=290))
+        fig_top = empty_figure(height=340)
+    fig_top.update_layout(**chart_layout(height=340, showlegend=False))
     fig_top.update_layout(showlegend=False, xaxis_title="USD", yaxis_title="Margen %")
 
     if evolucion:
+        meses = [format_month_label(item["mes"]) for item in evolucion]
+        ventas_mes = [item["importe_usd"] for item in evolucion]
+        kilos_mes = [item["kg"] for item in evolucion]
+        peak_month_idx = best_index(ventas_mes) or 0
         fig_evolucion = go.Figure()
         fig_evolucion.add_trace(
             go.Bar(
-                x=[item["mes"] for item in evolucion],
-                y=[item["importe_usd"] for item in evolucion],
+                x=meses,
+                y=ventas_mes,
                 name="Ventas USD",
-                marker_color="#95B29E",
+                marker_color=CHART_COLORS[1],
+                hovertemplate="<b>%{x}</b><br>Ventas: USD %{y:,.0f}<extra></extra>",
             )
         )
         fig_evolucion.add_trace(
             go.Scatter(
-                x=[item["mes"] for item in evolucion],
-                y=[item["kg"] for item in evolucion],
+                x=meses,
+                y=kilos_mes,
                 name="Kg vendidos",
                 mode="lines+markers",
-                line=dict(color="#B05D3B", width=2.5),
+                line=dict(color=CHART_COLORS[4], width=2.5),
+                marker=dict(size=7, color=CHART_COLORS[4]),
+                hovertemplate="<b>%{x}</b><br>Kg vendidos: %{y:,.0f}<extra></extra>",
                 yaxis="y2",
             )
         )
         fig_evolucion.update_layout(yaxis2=dict(overlaying="y", side="right", title="Kg", showgrid=False))
+        add_peak_annotation(
+            fig_evolucion,
+            meses[peak_month_idx],
+            ventas_mes[peak_month_idx],
+            f"Pico {fmt_usd(ventas_mes[peak_month_idx])}",
+        )
+        add_metric_badge(fig_evolucion, f"{meses[peak_month_idx]} concentró el mayor ingreso del período", tone="primary")
     else:
-        fig_evolucion = empty_figure()
-    fig_evolucion.update_layout(**chart_layout(height=320))
+        fig_evolucion = empty_figure(height=420)
+    fig_evolucion.update_layout(**chart_layout(height=420, emphasis="hero", unified_hover=True))
     fig_evolucion.update_layout(yaxis_title="USD")
 
     if tabla:

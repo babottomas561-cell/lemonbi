@@ -3,6 +3,7 @@ from fastapi import APIRouter
 from backend.services.loaders import (
     load_campo,
     load_comercial,
+    load_contexto,
     load_costos,
     load_empaque,
     load_finanzas,
@@ -10,6 +11,7 @@ from backend.services.loaders import (
 from backend.services.filters import (
     apply_campo_filters,
     apply_comercial_filters,
+    apply_contexto_filters,
     apply_costos_filters,
     apply_empaque_filters,
     apply_finanzas_filters,
@@ -37,6 +39,9 @@ def _panel_options(df, apply_fn, filters: dict, fields: dict[str, str], str_fiel
     response = {}
     for field_name, column in fields.items():
         scoped_filters = {key: value for key, value in filters.items() if key != field_name}
+        if field_name == "campaña":
+            scoped_filters.pop("fecha_desde", None)
+            scoped_filters.pop("fecha_hasta", None)
         scoped_df = apply_fn(df, **_clean_params(scoped_filters))
         response[field_name] = _unique_values(scoped_df, column, as_str=field_name in str_fields)
     return response
@@ -195,7 +200,8 @@ def get_panel_filter_options(
                 "finca": finca,
                 "variedad": variedad,
             },
-            {"finca": "finca", "variedad": "variedad"},
+            {"campaña": "campaña", "finca": "finca", "variedad": "variedad"},
+            str_fields={"campaña"},
         )
 
     if panel == "campo":
@@ -213,12 +219,14 @@ def get_panel_filter_options(
                 "encargado": encargado,
             },
             {
+                "campaña": "campaña",
                 "finca": "finca",
                 "variedad": "variedad",
                 "lote": "lote",
                 "estado": "estado_cosecha",
                 "encargado": "encargado",
             },
+            str_fields={"campaña"},
         )
 
     if panel == "empaque":
@@ -237,6 +245,7 @@ def get_panel_filter_options(
                 "calidad": calidad,
             },
             {
+                "campaña": "campaña",
                 "finca": "finca",
                 "lote": "lote",
                 "calibre": "calibre",
@@ -244,7 +253,7 @@ def get_panel_filter_options(
                 "linea": "linea",
                 "calidad": "calidad",
             },
-            str_fields={"calibre"},
+            str_fields={"campaña", "calibre"},
         )
 
     if panel == "comercial":
@@ -261,11 +270,13 @@ def get_panel_filter_options(
                 "moneda": moneda,
             },
             {
+                "campaña": "campaña",
                 "cliente": "cliente",
                 "destino": "destino",
                 "canal": "canal",
                 "moneda": "moneda",
             },
+            str_fields={"campaña"},
         )
 
     if panel == "finanzas":
@@ -282,11 +293,13 @@ def get_panel_filter_options(
                 "categoria_flujo": categoria_flujo,
             },
             {
+                "campaña": "campaña",
                 "banco_caja": "banco_caja",
                 "estado": "estado",
                 "tipo": "tipo",
                 "categoria_flujo": "categoria_flujo",
             },
+            str_fields={"campaña"},
         )
 
     if panel == "costos":
@@ -304,12 +317,27 @@ def get_panel_filter_options(
                 "canal": canal,
             },
             {
+                "campaña": "campaña",
                 "finca": "finca",
                 "lote": "lote",
                 "centro_costo": "centro_costo",
                 "tipo_costo": "tipo_costo",
                 "canal": "canal",
             },
+            str_fields={"campaña"},
+        )
+
+    if panel == "contexto":
+        return _panel_options(
+            load_contexto(),
+            apply_contexto_filters,
+            {
+                "campaña": campaña,
+                "fecha_desde": fecha_desde,
+                "fecha_hasta": fecha_hasta,
+            },
+            {"campaña": "campaña"},
+            str_fields={"campaña"},
         )
 
     return {}
